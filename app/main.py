@@ -20,6 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.api import api_router
 from app.core.config import settings
+from app.core.database import engine, init_db
 
 # --------------------------------------------------------------------------- #
 # Logging                                                                      #
@@ -38,10 +39,11 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Manage startup and shutdown side-effects."""
     logger.info("🚀  Revora engine starting up…")
-    # TODO Phase 1: initialise async DB engine / connection pool here.
+    await init_db()
     yield
     logger.info("🛑  Revora engine shutting down…")
-    # TODO Phase 1: dispose DB engine / close external connections here.
+    await engine.dispose()
+    logger.info("🗄️   Database engine disposed.")
 
 
 # --------------------------------------------------------------------------- #
