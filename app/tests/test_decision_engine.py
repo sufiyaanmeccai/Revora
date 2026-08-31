@@ -20,6 +20,7 @@ Strategy:
   • Assertions query the DB directly to verify the expected ORM state.
 """
 
+import json
 import uuid
 from datetime import datetime, timezone
 
@@ -152,6 +153,17 @@ async def test_gateway_error_creates_network_failure_workflow() -> None:
     assert wf.is_active       is True
     assert wf.current_step    == 1
 
+    # Two audit logs: WORKFLOW_INITIATED + SILENT_RETRY_SCHEDULED
+    async with factory() as session:
+        log_result = await session.execute(
+            select(RecoveryAuditLog).where(RecoveryAuditLog.payment_event_id == ev.id)
+        )
+        logs = log_result.scalars().all()
+    assert len(logs) == 2
+    action_types = {log.action_type for log in logs}
+    assert "WORKFLOW_INITIATED"    in action_types
+    assert "SILENT_RETRY_SCHEDULED" in action_types
+
 
 async def test_insufficient_funds_high_ticket_creates_downgrade_workflow() -> None:
     """High-ticket insufficient funds → ADAPTIVE_DOWNGRADE_OFFER."""
@@ -175,6 +187,17 @@ async def test_insufficient_funds_high_ticket_creates_downgrade_workflow() -> No
     assert wf.strategy        == RecoveryStrategy.ADAPTIVE_DOWNGRADE_OFFER
     assert wf.max_steps       == 4     # high-ticket gets an extra step
 
+    # Two audit logs: WORKFLOW_INITIATED + DOWNGRADE_OFFER_SENT
+    async with factory() as session:
+        log_result = await session.execute(
+            select(RecoveryAuditLog).where(RecoveryAuditLog.payment_event_id == ev.id)
+        )
+        logs = log_result.scalars().all()
+    assert len(logs) == 2
+    action_types = {log.action_type for log in logs}
+    assert "WORKFLOW_INITIATED"  in action_types
+    assert "DOWNGRADE_OFFER_SENT" in action_types
+
 
 async def test_insufficient_funds_low_ticket_creates_silent_retry_workflow() -> None:
     """Low-ticket insufficient funds → SILENT_MANDATE_RETRY."""
@@ -196,6 +219,14 @@ async def test_insufficient_funds_low_ticket_creates_silent_retry_workflow() -> 
 
     assert wf.diagnosed_cause == DiagnosedCause.INSUFFICIENT_FUNDS_ADAPTIVE
     assert wf.strategy        == RecoveryStrategy.SILENT_MANDATE_RETRY
+
+    # Two audit logs: WORKFLOW_INITIATED + SILENT_RETRY_SCHEDULED
+    async with factory() as session:
+        log_result = await session.execute(
+            select(RecoveryAuditLog).where(RecoveryAuditLog.payment_event_id == ev.id)
+        )
+        logs = log_result.scalars().all()
+    assert len(logs) == 2
 
 
 async def test_payment_event_status_updated_to_in_recovery() -> None:
@@ -220,7 +251,7 @@ async def test_payment_event_status_updated_to_in_recovery() -> None:
 
 
 async def test_audit_log_created_with_correct_action_type() -> None:
-    """A WORKFLOW_INITIATED audit log entry must exist after processing."""
+    """Both audit logs (WORKFLOW_INITIATED + execution action) must exist after processing."""
     eng, factory = _make_test_factory()
     await _bootstrap(eng)
 
@@ -233,18 +264,35 @@ async def test_audit_log_created_with_correct_action_type() -> None:
 
     async with factory() as session:
         log_result = await session.execute(
-            select(RecoveryAuditLog).where(
-                RecoveryAuditLog.payment_event_id == ev.id,
-                RecoveryAuditLog.action_type == "WORKFLOW_INITIATED",
-            )
+            select(RecoveryAuditLog).where(RecoveryAuditLog.payment_event_id == ev.id)
         )
-        logs = log_result.scalars().all()
+        all_logs = log_result.scalars().all()
 
-    assert len(logs) == 1, f"Expected 1 audit log, found {len(logs)}"
-    log = logs[0]
-    assert log.channel  == "SYSTEM"
-    assert log.reasoning is not None
-    assert len(log.reasoning) > 10
+    # Must have exactly 2 audit log entries
+    assert len(all_logs) == 2, f"Expected 2 audit logs, found {len(all_logs)}"
+    action_types = {log.action_type for log in all_logs}
+    assert "WORKFLOW_INITIATED" in action_types
+    assert "WHATSAPP_NUDGE_SENT" in action_types   # card_declined → SECURE_PAYMENT_LINK
+
+    # Log 1: diagnosis log
+    diag_log = next(l for l in all_logs if l.action_type == "WORKFLOW_INITIATED")
+    assert diag_log.channel      == "SYSTEM"
+    assert diag_log.reasoning    is not None
+    assert len(diag_log.reasoning) > 10
+    assert diag_log.metadata_json is not None
+    diag_meta = json.loads(diag_log.metadata_json)
+    assert diag_meta["diagnosed_cause"] == "EXPIRED_PAYMENT_METHOD"
+    assert diag_meta["strategy"]         == "SECURE_PAYMENT_LINK"
+    assert isinstance(diag_meta["max_steps"], int)
+
+    # Log 2: execution log
+    exec_log = next(l for l in all_logs if l.action_type == "WHATSAPP_NUDGE_SENT")
+    assert exec_log.channel        == "WHATSAPP"
+    assert exec_log.metadata_json  is not None
+    exec_meta = json.loads(exec_log.metadata_json)
+    assert exec_meta["status"]   == "delivered"
+    assert exec_meta["channel"]  == "whatsapp"
+    assert "payment_link" in exec_meta
 
 
 async def test_default_fallback_routing() -> None:
@@ -267,6 +315,45 @@ async def test_default_fallback_routing() -> None:
 
     assert wf.diagnosed_cause == DiagnosedCause.MANDATE_DECLINED
     assert wf.strategy        == RecoveryStrategy.SECURE_PAYMENT_LINK
+
+    # Two audit logs: WORKFLOW_INITIATED + WHATSAPP_NUDGE_SENT
+    async with factory() as session:
+        log_result = await session.execute(
+            select(RecoveryAuditLog).where(RecoveryAuditLog.payment_event_id == ev.id)
+        )
+        logs = log_result.scalars().all()
+    assert len(logs) == 2
+    action_types = {log.action_type for log in logs}
+    assert "WORKFLOW_INITIATED"  in action_types
+    assert "WHATSAPP_NUDGE_SENT" in action_types
+
+
+async def test_execution_audit_log_metadata_is_populated() -> None:
+    """The execution audit log must contain valid, parseable JSON metadata."""
+    eng, factory = _make_test_factory()
+    await _bootstrap(eng)
+
+    # Gateway error → SILENT_RETRY_SCHEDULED → metadata has status=scheduled_with_razorpay
+    ev = _event(error_code="GATEWAY_ERROR", error_reason="timeout", amount=299.0)
+    async with factory() as session:
+        session.add(ev)
+        await session.commit()
+
+    await process_payment_event(ev.id, _session_factory=factory)
+
+    async with factory() as session:
+        log_result = await session.execute(
+            select(RecoveryAuditLog).where(
+                RecoveryAuditLog.payment_event_id == ev.id,
+                RecoveryAuditLog.action_type == "SILENT_RETRY_SCHEDULED",
+            )
+        )
+        exec_log = log_result.scalar_one()
+
+    assert exec_log.metadata_json is not None
+    meta = json.loads(exec_log.metadata_json)
+    assert meta["status"]  == "scheduled_with_razorpay"
+    assert meta["channel"] == "SYSTEM"
 
 
 async def test_already_in_recovery_is_skipped() -> None:

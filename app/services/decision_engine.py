@@ -26,11 +26,12 @@ Design principles:
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Callable, Optional
+from typing import Any, Callable, Dict, Optional
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -43,6 +44,8 @@ from app.models.orm import (
     RecoveryStrategy,
     RecoveryWorkflow,
 )
+from app.services.outreach import OutreachService
+from app.services.razorpay_client import RazorpayService
 
 logger = logging.getLogger(__name__)
 
@@ -201,6 +204,7 @@ def _diagnose(
 async def process_payment_event(
     event_id: str,
     _session_factory: Optional[Callable[[], async_sessionmaker]] = None,
+    _outreach_service: Optional[OutreachService] = None,
 ) -> None:
     """
     Run the decision engine for a given PaymentEvent ID.
@@ -210,26 +214,36 @@ async def process_payment_event(
     independent of the originating HTTP request's session lifecycle.
 
     Args:
-        event_id:         Primary key of the ``PaymentEvent`` to process.
-        _session_factory: Optional override for the session factory (used in
-                          tests to inject an in-memory SQLite session maker).
+        event_id:          Primary key of the ``PaymentEvent`` to process.
+        _session_factory:  Optional override for the session factory (tests).
+        _outreach_service: Optional override for OutreachService (tests).
     """
-    # Import here to allow _session_factory override in tests without
-    # triggering the real engine import at module load time.
     if _session_factory is None:
         from app.core.database import AsyncSessionLocal as _session_factory  # type: ignore[assignment]
 
+    if _outreach_service is None:
+        _outreach_service = OutreachService()
+
     async with _session_factory() as db:  # type: ignore[operator]
-        await _run_engine(db, event_id)
+        await _run_engine(db, event_id, _outreach_service)
 
 
-async def _run_engine(db: AsyncSession, event_id: str) -> None:
+async def _run_engine(
+    db: AsyncSession,
+    event_id: str,
+    outreach_service: Optional[OutreachService] = None,
+) -> None:
     """
     Core engine logic operating inside an existing AsyncSession.
 
     Separated from ``process_payment_event`` so it can be unit-tested
-    directly by injecting a session.
+    directly by injecting a session and outreach service.
     """
+    if outreach_service is None:
+        outreach_service = OutreachService()
+
+    razorpay = RazorpayService()
+
     # ── 1. Fetch PaymentEvent ────────────────────────────────────────────────
     result = await db.execute(
         select(PaymentEvent).where(PaymentEvent.id == event_id)
@@ -283,29 +297,91 @@ async def _run_engine(db: AsyncSession, event_id: str) -> None:
     # Flush so workflow.id is available for the audit log FK
     await db.flush()
 
-    # ── 5. Append RecoveryAuditLog ────────────────────────────────────────────
-    audit_log = RecoveryAuditLog(
+    # ── 5. Audit log #1 — WORKFLOW_INITIATED ──────────────────────────────────
+    diagnosis_log = RecoveryAuditLog(
         id=str(uuid.uuid4()),
         workflow_id=workflow.id,
         payment_event_id=event_id,
         action_type="WORKFLOW_INITIATED",
         reasoning=diagnosis.reasoning,
         channel="SYSTEM",
-        metadata_json=(
-            f'{{"diagnosed_cause": "{diagnosis.cause.value}", '
-            f'"strategy": "{diagnosis.strategy.value}", '
-            f'"max_steps": {diagnosis.max_steps}}}'
-        ),
+        metadata_json=json.dumps({
+            "diagnosed_cause": diagnosis.cause.value,
+            "strategy":        diagnosis.strategy.value,
+            "max_steps":       diagnosis.max_steps,
+        }),
         timestamp=datetime.now(timezone.utc),
     )
-    db.add(audit_log)
+    db.add(diagnosis_log)
 
-    # ── 6. Commit atomically ──────────────────────────────────────────────────
+    # ── 6. Execute outreach strategy ──────────────────────────────────────────
+    outreach_result: Dict[str, Any]
+    action_type:     str
+    channel:         str
+
+    strategy = diagnosis.strategy
+
+    if strategy in (RecoveryStrategy.SECURE_PAYMENT_LINK, RecoveryStrategy.UPI_AUTOPAY_MIGRATION):
+        link = await razorpay.generate_payment_link(
+            amount=event.amount,
+            customer_name=event.customer_name,
+            customer_email=event.customer_email,
+            reference_id=event.id,
+        )
+        outreach_result = await outreach_service.send_whatsapp_recovery(event, link)
+        action_type     = "WHATSAPP_NUDGE_SENT"
+        channel         = "WHATSAPP"
+
+    elif strategy == RecoveryStrategy.HINGLISH_VOICE_OUTREACH:
+        link = await razorpay.generate_payment_link(
+            amount=event.amount,
+            customer_name=event.customer_name,
+            customer_email=event.customer_email,
+            reference_id=event.id,
+        )
+        outreach_result = await outreach_service.trigger_hinglish_voice(event, link)
+        action_type     = "VOICE_CALL_TRIGGERED"
+        channel         = "VOICE"
+
+    elif strategy == RecoveryStrategy.ADAPTIVE_DOWNGRADE_OFFER:
+        outreach_result = await outreach_service.execute_adaptive_downgrade(event)
+        action_type     = "DOWNGRADE_OFFER_SENT"
+        channel         = "EMAIL"
+
+    else:
+        # SILENT_MANDATE_RETRY — no external outreach
+        outreach_result = {"status": "scheduled_with_razorpay", "channel": "SYSTEM"}
+        action_type     = "SILENT_RETRY_SCHEDULED"
+        channel         = "SYSTEM"
+
+    logger.info(
+        "Decision engine: outreach dispatched for PaymentEvent '%s' | "
+        "action=%s | status=%s",
+        event_id,
+        action_type,
+        outreach_result.get("status"),
+    )
+
+    # ── 7. Audit log #2 — executed outreach action ────────────────────────────
+    execution_log = RecoveryAuditLog(
+        id=str(uuid.uuid4()),
+        workflow_id=workflow.id,
+        payment_event_id=event_id,
+        action_type=action_type,
+        reasoning=f"Strategy {strategy.value} executed. Result: {outreach_result.get('status')}.",
+        channel=channel,
+        metadata_json=json.dumps(outreach_result, default=str),
+        timestamp=datetime.now(timezone.utc),
+    )
+    db.add(execution_log)
+
+    # ── 8. Commit atomically ──────────────────────────────────────────────────
     await db.commit()
 
     logger.info(
         "Decision engine: Workflow '%s' created for PaymentEvent '%s'. "
-        "Status: AT_RISK → IN_RECOVERY.",
+        "Status: AT_RISK → IN_RECOVERY. Action: %s.",
         workflow.id,
         event_id,
+        action_type,
     )
