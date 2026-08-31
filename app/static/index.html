@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Revora | Autonomous Revenue Recovery Engine</title>
+  
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              bg: '#0C1017',
+              card: '#161D26',
+              cardHover: '#1D2633',
+              border: '#232D3B',
+              primary: '#0C83FD',
+              primaryHover: '#0A72DE',
+              accent: '#53B5FD',
+              success: '#00D09C',
+              warning: '#FFAA00',
+              danger: '#FF5C5C',
+              textMuted: '#8A99AD',
+              textLight: '#E6EDF5',
+            }
+          },
+          fontFamily: {
+            sans: ['Inter', 'sans-serif'],
+            mono: ['JetBrains Mono', 'monospace'],
+          }
+        }
+      }
+    }
+  </script>
+
+  <style>
+    body {
+      background-color: #0C1017;
+      color: #E6EDF5;
+      font-family: 'Inter', sans-serif;
+    }
+    .custom-scrollbar::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    .custom-scrollbar::-webkit-scrollbar-track {
+      background: #121820;
+    }
+    .custom-scrollbar::-webkit-scrollbar-thumb {
+      background: #232D3B;
+      border-radius: 3px;
+    }
+    .glow-primary {
+      box-shadow: 0 0 25px -5px rgba(12, 131, 253, 0.35);
+    }
+    .pulse-dot {
+      animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.4; transform: scale(0.9); }
+    }
+  </style>
+</head>
+<body class="min-h-screen flex flex-col antialiased selection:bg-brand-primary selection:text-white">
+
+  <!-- Top Navigation Header -->
+  <header class="border-b border-brand-border bg-brand-card/80 backdrop-blur-md sticky top-0 z-50">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+      <div class="flex items-center space-x-3">
+        <!-- Logo -->
+        <div class="h-9 w-9 rounded-lg bg-gradient-to-tr from-brand-primary to-brand-accent flex items-center justify-center font-bold text-white shadow-md">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+          </svg>
+        </div>
+        <div>
+          <div class="flex items-center space-x-2">
+            <span class="font-extrabold text-lg tracking-tight text-white">REVORA</span>
+            <span class="px-2 py-0.5 text-[10px] font-semibold bg-brand-primary/20 text-brand-accent rounded border border-brand-primary/30 uppercase tracking-wider">Track 03</span>
+          </div>
+          <p class="text-xs text-brand-textMuted hidden sm:block">Autonomous AI Revenue Recovery Engine</p>
+        </div>
+      </div>
+
+      <!-- Engine Status & Links -->
+      <div class="flex items-center space-x-4">
+        <div class="flex items-center space-x-2 bg-[#0E141D] px-3 py-1.5 rounded-full border border-brand-border text-xs">
+          <span class="w-2 h-2 rounded-full bg-brand-success pulse-dot"></span>
+          <span class="text-brand-textLight font-medium">Engine Active</span>
+          <span class="text-brand-textMuted">|</span>
+          <span class="text-brand-textMuted font-mono" id="lastUpdated">Updating...</span>
+        </div>
+
+        <a href="/docs" target="_blank" class="text-xs font-medium text-brand-textMuted hover:text-brand-accent transition flex items-center space-x-1">
+          <span>API Docs</span>
+          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+          </svg>
+        </a>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Content Area -->
+  <main class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
+
+    <!-- Action Bar & Hero Banner -->
+    <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-gradient-to-r from-brand-card via-brand-card to-[#192433] p-6 rounded-2xl border border-brand-border relative overflow-hidden shadow-xl">
+      <div class="absolute -right-10 -bottom-10 w-64 h-64 bg-brand-primary/10 rounded-full blur-3xl pointer-events-none"></div>
+      
+      <div class="space-y-1.5 z-10">
+        <div class="flex items-center space-x-2">
+          <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-brand-success/15 text-brand-success border border-brand-success/30">
+            ● Live Razorpay Webhook Ready
+          </span>
+          <span class="text-xs text-brand-textMuted font-mono">/api/v1/webhooks/razorpay</span>
+        </div>
+        <h1 class="text-2xl font-bold text-white tracking-tight">Recovery Operations Center</h1>
+        <p class="text-sm text-brand-textMuted max-w-2xl">
+          Automates root-cause diagnosis, silent mandate backoffs, Hinglish voice outreach, and adaptive downgrades for failed subscription payments.
+        </p>
+      </div>
+
+      <!-- Action Buttons -->
+      <div class="flex items-center space-x-3 z-10">
+        <button id="refreshBtn" onclick="fetchMetrics(true)" class="px-4 py-2.5 bg-brand-card hover:bg-brand-cardHover border border-brand-border text-brand-textLight rounded-xl text-sm font-medium transition flex items-center space-x-2 hover:border-brand-primary/50">
+          <svg id="refreshIcon" class="w-4 h-4 text-brand-textMuted" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+          </svg>
+          <span>Refresh</span>
+        </button>
+
+        <button id="simBtn" onclick="runBatchSimulation(50)" class="px-5 py-2.5 bg-gradient-to-r from-brand-primary to-brand-accent hover:from-brand-primaryHover hover:to-brand-primary text-white rounded-xl text-sm font-semibold shadow-lg glow-primary transition transform active:scale-95 flex items-center space-x-2">
+          <svg id="simSpinner" class="hidden animate-spin w-4 h-4 text-white" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+          </svg>
+          <svg id="simIcon" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <span id="simBtnText">Run Batch Simulation (50 Events)</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Notification / Toast Container -->
+    <div id="toastContainer" class="hidden transition-all duration-300"></div>
+
+    <!-- Metrics Grid -->
+    <section>
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-sm font-semibold uppercase tracking-wider text-brand-textMuted">Live Engine Metrics</h2>
+        <span class="text-xs text-brand-accent font-medium cursor-pointer hover:underline" onclick="fetchMetrics(true)">Auto-refreshes every 5s</span>
+      </div>
+
+      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
+        
+        <!-- Card 1: Total Revenue at Risk -->
+        <div class="bg-brand-card p-5 rounded-2xl border border-brand-border hover:border-brand-primary/40 transition duration-200 shadow-md flex flex-col justify-between">
+          <div class="flex items-center justify-between">
+            <span class="text-xs font-semibold uppercase tracking-wider text-brand-textMuted">Total Revenue At Risk</span>
+            <div class="w-8 h-8 rounded-lg bg-brand-danger/15 text-brand-danger flex items-center justify-center font-bold">
+              ₹
+            </div>
+          </div>
+          <div class="mt-4">
+            <div class="text-2xl lg:text-3xl font-extrabold text-white tracking-tight" id="metricAmountAtRisk">₹ 0.00</div>
+            <div class="flex items-center space-x-1.5 mt-1 text-xs text-brand-textMuted">
+              <span class="text-brand-danger font-semibold">● Exposure</span>
+              <span>across all failed charges</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Card 2: Total Events at Risk -->
+        <div class="bg-brand-card p-5 rounded-2xl border border-brand-border hover:border-brand-primary/40 transition duration-200 shadow-md flex flex-col justify-between">
+          <div class="flex items-center justify-between">
+            <span class="text-xs font-semibold uppercase tracking-wider text-brand-textMuted">Total Failed Events</span>
+            <div class="w-8 h-8 rounded-lg bg-brand-warning/15 text-brand-warning flex items-center justify-center">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+              </svg>
+            </div>
+          </div>
+          <div class="mt-4">
+            <div class="text-2xl lg:text-3xl font-extrabold text-white tracking-tight" id="metricEventsAtRisk">0</div>
+            <div class="flex items-center space-x-1.5 mt-1 text-xs text-brand-textMuted">
+              <span class="text-brand-warning font-semibold">AT_RISK</span>
+              <span>queued for diagnosis</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Card 3: Events in Recovery -->
+        <div class="bg-brand-card p-5 rounded-2xl border border-brand-border hover:border-brand-primary/40 transition duration-200 shadow-md flex flex-col justify-between">
+          <div class="flex items-center justify-between">
+            <span class="text-xs font-semibold uppercase tracking-wider text-brand-textMuted">In Recovery Pipeline</span>
+            <div class="w-8 h-8 rounded-lg bg-brand-primary/15 text-brand-accent flex items-center justify-center">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+              </svg>
+            </div>
+          </div>
+          <div class="mt-4">
+            <div class="text-2xl lg:text-3xl font-extrabold text-brand-accent tracking-tight" id="metricInRecovery">0</div>
+            <div class="flex items-center space-x-1.5 mt-1 text-xs text-brand-textMuted">
+              <span class="text-brand-accent font-semibold">Active</span>
+              <span>workflows running</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Card 4: Recovered Rate & Revenue -->
+        <div class="bg-brand-card p-5 rounded-2xl border border-brand-border hover:border-brand-primary/40 transition duration-200 shadow-md flex flex-col justify-between">
+          <div class="flex items-center justify-between">
+            <span class="text-xs font-semibold uppercase tracking-wider text-brand-textMuted">Recovered Revenue</span>
+            <div class="w-8 h-8 rounded-lg bg-brand-success/15 text-brand-success flex items-center justify-center font-bold">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+            </div>
+          </div>
+          <div class="mt-4">
+            <div class="text-2xl lg:text-3xl font-extrabold text-brand-success tracking-tight" id="metricRecoveredAmount">₹ 0.00</div>
+            <div class="flex items-center space-x-1.5 mt-1 text-xs text-brand-textMuted">
+              <span class="text-brand-success font-semibold" id="metricRecoveryRate">0.0% Rate</span>
+              <span>· Recovered: <span id="metricTotalRecovered">0</span></span>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- Breakdowns Section (Causes vs Strategies) -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      
+      <!-- Panel 1: Diagnosed Root Causes -->
+      <div class="bg-brand-card p-6 rounded-2xl border border-brand-border shadow-lg flex flex-col">
+        <div class="flex items-center justify-between pb-4 border-b border-brand-border">
+          <div class="flex items-center space-x-2">
+            <div class="w-2.5 h-2.5 rounded-full bg-brand-accent"></div>
+            <h3 class="font-bold text-white text-base">Root-Cause Diagnosis Breakdown</h3>
+          </div>
+          <span class="text-xs font-mono text-brand-textMuted">RecoveryWorkflow.diagnosed_cause</span>
+        </div>
+
+        <div id="causesContainer" class="mt-4 space-y-3 flex-1 flex flex-col justify-center">
+          <div class="text-center py-8 text-brand-textMuted text-sm">
+            No workflows diagnosed yet. Run a simulation above to populate.
+          </div>
+        </div>
+      </div>
+
+      <!-- Panel 2: Executed Recovery Strategies -->
+      <div class="bg-brand-card p-6 rounded-2xl border border-brand-border shadow-lg flex flex-col">
+        <div class="flex items-center justify-between pb-4 border-b border-brand-border">
+          <div class="flex items-center space-x-2">
+            <div class="w-2.5 h-2.5 rounded-full bg-brand-success"></div>
+            <h3 class="font-bold text-white text-base">Autonomous Strategy Routing</h3>
+          </div>
+          <span class="text-xs font-mono text-brand-textMuted">RecoveryWorkflow.strategy</span>
+        </div>
+
+        <div id="strategiesContainer" class="mt-4 space-y-3 flex-1 flex flex-col justify-center">
+          <div class="text-center py-8 text-brand-textMuted text-sm">
+            No recovery strategies executed yet. Run a simulation to trigger.
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Audit Log & Action Breakdown Panel -->
+    <div class="bg-brand-card p-6 rounded-2xl border border-brand-border shadow-lg">
+      <div class="flex flex-col sm:flex-row sm:items-center justify-between pb-4 border-b border-brand-border gap-2">
+        <div class="flex items-center space-x-2">
+          <div class="w-2.5 h-2.5 rounded-full bg-brand-warning"></div>
+          <h3 class="font-bold text-white text-base">Intervention Audit Trail Breakdown</h3>
+        </div>
+        <span class="text-xs text-brand-textMuted font-mono">Immutable Compliance Ledger (RecoveryAuditLog)</span>
+      </div>
+
+      <div id="actionsContainer" class="mt-4 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
+        <div class="col-span-full text-center py-6 text-brand-textMuted text-sm">
+          No audit logs recorded yet.
+        </div>
+      </div>
+    </div>
+
+    <!-- Architecture & Scenario Guide -->
+    <div class="bg-gradient-to-br from-[#121822] to-brand-card p-6 rounded-2xl border border-brand-border">
+      <h3 class="text-sm font-bold uppercase tracking-wider text-brand-accent mb-3">Key Scenarios Handled Autonomously</h3>
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
+        <div class="bg-brand-bg/60 p-4 rounded-xl border border-brand-border/60">
+          <div class="font-bold text-white text-sm mb-1 text-brand-primary">1. Temporary Network Backoff</div>
+          <p class="text-brand-textMuted">
+            Gateway timeouts & bank offline errors undergo silent mandate retry with exponential backoff — zero customer annoyance.
+          </p>
+        </div>
+        <div class="bg-brand-bg/60 p-4 rounded-xl border border-brand-border/60">
+          <div class="font-bold text-white text-sm mb-1 text-brand-accent">2. Mandate Migration & Voice</div>
+          <p class="text-brand-textMuted">
+            Card expiration/declines trigger WhatsApp payment links & Hinglish voice calls to update card or migrate to UPI AutoPay.
+          </p>
+        </div>
+        <div class="bg-brand-bg/60 p-4 rounded-xl border border-brand-border/60">
+          <div class="font-bold text-white text-sm mb-1 text-brand-success">3. Adaptive Downsell Engine</div>
+          <p class="text-brand-textMuted">
+            High-ticket insufficient funds automatically trigger dynamic checkout downsell offers (50% value) to save subscriptions.
+          </p>
+        </div>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- Footer -->
+  <footer class="border-t border-brand-border bg-brand-card/50 py-6 text-center text-xs text-brand-textMuted">
+    <div class="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-2">
+      <p>Revora · Autonomous AI Revenue Recovery Engine for Razorpay Buildathon</p>
+      <div class="flex items-center space-x-4">
+        <span class="font-mono">FastAPI + Async SQLAlchemy + Razorpay API</span>
+      </div>
+    </div>
+  </footer>
+
+  <!-- Vanilla JS Dashboard Logic -->
+  <script>
+    // Format INR Currency
+    function formatINR(val) {
+      if (val === undefined || val === null || isNaN(val)) return '₹ 0.00';
+      return '₹ ' + Number(val).toLocaleString('en-IN', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      });
+    }
+
+    // Show Toast Notification
+    function showToast(message, type = 'success') {
+      const container = document.getElementById('toastContainer');
+      const bg = type === 'success' ? 'bg-brand-success/20 border-brand-success text-brand-success' : 'bg-brand-danger/20 border-brand-danger text-brand-danger';
+      
+      container.className = `p-4 rounded-xl border text-sm font-medium flex items-center justify-between ${bg}`;
+      container.innerHTML = `
+        <span>${message}</span>
+        <button onclick="document.getElementById('toastContainer').className='hidden'" class="ml-4 font-bold text-xs opacity-70 hover:opacity-100">✕</button>
+      `;
+      container.classList.remove('hidden');
+
+      setTimeout(() => {
+        container.classList.add('hidden');
+      }, 6000);
+    }
+
+    // Fetch and render metrics
+    async function fetchMetrics(showToastOnManual = false) {
+      const refreshIcon = document.getElementById('refreshIcon');
+      refreshIcon.classList.add('animate-spin');
+
+      try {
+        const res = await fetch('/api/v1/metrics');
+        if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+        const data = await res.json();
+
+        // Update top-level metric numbers
+        document.getElementById('metricAmountAtRisk').textContent = formatINR(data.total_amount_at_risk);
+        document.getElementById('metricEventsAtRisk').textContent = (data.total_at_risk || 0).toLocaleString();
+        document.getElementById('metricInRecovery').textContent = (data.total_in_recovery || 0).toLocaleString();
+        document.getElementById('metricRecoveredAmount').textContent = formatINR(data.recovered_amount);
+        document.getElementById('metricRecoveryRate').textContent = `${(data.recovery_rate_pct || 0).toFixed(1)}% Rate`;
+        document.getElementById('metricTotalRecovered').textContent = (data.total_recovered || 0).toLocaleString();
+
+        document.getElementById('lastUpdated').textContent = new Date().toLocaleTimeString();
+
+        // Render Cause Breakdown
+        renderCauses(data.cause_breakdown || {});
+
+        // Render Strategy Breakdown
+        renderStrategies(data.strategy_breakdown || {});
+
+        // Render Action Breakdown
+        renderActions(data.action_breakdowns || []);
+
+        if (showToastOnManual) {
+          showToast('Metrics refreshed successfully.', 'success');
+        }
+      } catch (err) {
+        console.error('Error fetching metrics:', err);
+        if (showToastOnManual) {
+          showToast('Failed to load metrics from engine.', 'error');
+        }
+      } finally {
+        setTimeout(() => refreshIcon.classList.remove('animate-spin'), 400);
+      }
+    }
+
+    // Render Cause Breakdown list items
+    function renderCauses(causes) {
+      const container = document.getElementById('causesContainer');
+      const entries = Object.entries(causes);
+
+      if (entries.length === 0) {
+        container.innerHTML = `
+          <div class="text-center py-8 text-brand-textMuted text-sm">
+            No workflows diagnosed yet. Run a simulation above to populate.
+          </div>
+        `;
+        return;
+      }
+
+      const total = entries.reduce((acc, [_, count]) => acc + count, 0);
+
+      const itemsHtml = entries.map(([cause, count]) => {
+        const pct = total > 0 ? Math.round((count / total) * 100) : 0;
+        const cleanName = cause.replace(/_/g, ' ');
+        return `
+          <div class="bg-brand-bg/70 p-3 rounded-xl border border-brand-border/60 hover:border-brand-accent/40 transition">
+            <div class="flex items-center justify-between text-xs mb-1.5">
+              <span class="font-semibold text-white tracking-wide font-mono text-[11px]">${cleanName}</span>
+              <span class="text-brand-accent font-bold">${count} <span class="text-brand-textMuted font-normal">(${pct}%)</span></span>
+            </div>
+            <div class="w-full bg-[#1A2330] h-1.5 rounded-full overflow-hidden">
+              <div class="bg-gradient-to-r from-brand-primary to-brand-accent h-1.5 rounded-full" style="width: ${pct}%"></div>
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      container.innerHTML = itemsHtml;
+    }
+
+    // Render Strategy Breakdown list items
+    function renderStrategies(strategies) {
+      const container = document.getElementById('strategiesContainer');
+      const entries = Object.entries(strategies);
+
+      if (entries.length === 0) {
+        container.innerHTML = `
+          <div class="text-center py-8 text-brand-textMuted text-sm">
+            No recovery strategies executed yet. Run a simulation to trigger.
+          </div>
+        `;
+        return;
+      }
+
+      const total = entries.reduce((acc, [_, count]) => acc + count, 0);
+
+      const itemsHtml = entries.map(([strat, count]) => {
+        const pct = total > 0 ? Math.round((count / total) * 100) : 0;
+        const cleanName = strat.replace(/_/g, ' ');
+        return `
+          <div class="bg-brand-bg/70 p-3 rounded-xl border border-brand-border/60 hover:border-brand-success/40 transition">
+            <div class="flex items-center justify-between text-xs mb-1.5">
+              <span class="font-semibold text-white tracking-wide font-mono text-[11px]">${cleanName}</span>
+              <span class="text-brand-success font-bold">${count} <span class="text-brand-textMuted font-normal">(${pct}%)</span></span>
+            </div>
+            <div class="w-full bg-[#1A2330] h-1.5 rounded-full overflow-hidden">
+              <div class="bg-gradient-to-r from-brand-success to-emerald-400 h-1.5 rounded-full" style="width: ${pct}%"></div>
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      container.innerHTML = itemsHtml;
+    }
+
+    // Render Action Breakdown pills
+    function renderActions(actions) {
+      const container = document.getElementById('actionsContainer');
+      if (!actions || actions.length === 0) {
+        container.innerHTML = `
+          <div class="col-span-full text-center py-6 text-brand-textMuted text-sm">
+            No audit logs recorded yet.
+          </div>
+        `;
+        return;
+      }
+
+      const cardsHtml = actions.map(act => {
+        const cleanName = (act.action_type || 'UNKNOWN').replace(/_/g, ' ');
+        return `
+          <div class="bg-brand-bg/80 p-3.5 rounded-xl border border-brand-border/80 flex flex-col justify-between">
+            <span class="text-[11px] font-mono text-brand-textMuted uppercase">${cleanName}</span>
+            <div class="text-xl font-bold text-white mt-1">${act.count} <span class="text-xs font-normal text-brand-textMuted">events</span></div>
+          </div>
+        `;
+      }).join('');
+
+      container.innerHTML = cardsHtml;
+    }
+
+    // Run Batch Simulation Button Handler
+    async function runBatchSimulation(count = 50) {
+      const simBtn = document.getElementById('simBtn');
+      const simSpinner = document.getElementById('simSpinner');
+      const simIcon = document.getElementById('simIcon');
+      const simBtnText = document.getElementById('simBtnText');
+
+      // Set loading state
+      simBtn.disabled = true;
+      simBtn.classList.add('opacity-75', 'cursor-not-allowed');
+      simSpinner.classList.remove('hidden');
+      simIcon.classList.add('hidden');
+      simBtnText.textContent = `Generating & Routing ${count} Events...`;
+
+      try {
+        const res = await fetch(`/api/v1/simulation/run?count=${count}`, {
+          method: 'POST'
+        });
+
+        if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+        const data = await res.json();
+
+        showToast(`⚡ Generated ${data.count} synthetic failed payments! Decision engine background pipeline dispatched.`, 'success');
+
+        // Immediately refresh metrics and then again after 1.5s as background workers complete
+        await fetchMetrics();
+        setTimeout(fetchMetrics, 1500);
+        setTimeout(fetchMetrics, 3500);
+
+      } catch (err) {
+        console.error('Error running simulation:', err);
+        showToast('Failed to run batch simulation: ' + err.message, 'error');
+      } finally {
+        simBtn.disabled = false;
+        simBtn.classList.remove('opacity-75', 'cursor-not-allowed');
+        simSpinner.classList.add('hidden');
+        simIcon.classList.remove('hidden');
+        simBtnText.textContent = `Run Batch Simulation (${count} Events)`;
+      }
+    }
+
+    // Initial load and periodic polling
+    document.addEventListener('DOMContentLoaded', () => {
+      fetchMetrics();
+      // Poll every 5 seconds for smooth real-time dashboard feel
+      setInterval(() => fetchMetrics(false), 5000);
+    });
+  </script>
+</body>
+</html>

@@ -49,3 +49,18 @@ async def test_health_check_content_type() -> None:
         response = await client.get("/api/v1/health")
 
     assert "application/json" in response.headers["content-type"]
+
+
+@pytest.mark.asyncio
+async def test_root_serves_dashboard_html() -> None:
+    """GET / must return HTTP 200 and serve the dashboard HTML."""
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.get("/")
+
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    assert "REVORA" in response.text
+    assert "Recovery Operations Center" in response.text
+

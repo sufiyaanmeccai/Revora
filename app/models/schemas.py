@@ -223,5 +223,14 @@ class RecoverySummaryStats(BaseModel):
         default_factory=list,
         description="Per-action-type audit log counts",
     )
+    cause_breakdown:       Dict[str, int] = Field(
+        default_factory=dict,
+        description="Breakdown of workflows grouped by diagnosed cause",
+    )
+    strategy_breakdown:    Dict[str, int] = Field(
+        default_factory=dict,
+        description="Breakdown of workflows grouped by recovery strategy",
+    )
 
     model_config = ConfigDict(from_attributes=True)
+

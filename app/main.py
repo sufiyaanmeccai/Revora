@@ -13,10 +13,14 @@ Responsibilities:
 import logging
 
 from contextlib import asynccontextmanager
+import os
+from pathlib import Path
 from typing import AsyncGenerator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.api.v1.api import api_router
 from app.core.config import settings
@@ -74,18 +78,25 @@ app.add_middleware(
 )
 
 # --------------------------------------------------------------------------- #
+# Static Files & UI Mounting                                                   #
+# --------------------------------------------------------------------------- #
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+STATIC_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+# --------------------------------------------------------------------------- #
 # Routers                                                                      #
 # --------------------------------------------------------------------------- #
 app.include_router(api_router, prefix=settings.API_V1_STR)
 
 
 # --------------------------------------------------------------------------- #
-# Root redirect                                                                #
+# Root UI Endpoint                                                             #
 # --------------------------------------------------------------------------- #
 @app.get("/", include_in_schema=False)
-async def root() -> dict:
-    return {
-        "service": settings.PROJECT_NAME,
-        "version": "1.0.0",
-        "docs": "/docs",
-    }
+async def root() -> FileResponse:
+    index_path = STATIC_DIR / "index.html"
+    if index_path.exists():
+        return FileResponse(str(index_path))
+    return FileResponse(os.path.join(os.path.dirname(__file__), "static", "index.html"))
+
