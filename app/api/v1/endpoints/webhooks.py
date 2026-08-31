@@ -11,7 +11,8 @@ Flow for POST /api/v1/webhooks/razorpay:
        • payment.failed          → extract entity, persist PaymentEvent.
        • subscription.halted     → (same extraction path, future workflow hook).
        • anything else           → acknowledge immediately (avoid Razorpay retries).
-  5. Return HTTP 200 on success.
+  5. Return HTTP 200 instantly.
+  6. Decision engine runs as a BackgroundTask after the response is sent.
 """
 
 import json
@@ -19,7 +20,7 @@ import logging
 import uuid
 from typing import Any, Dict
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,6 +28,7 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.core.security import verify_webhook_signature
 from app.models.orm import PaymentEvent, PaymentStatus
+from app.services.decision_engine import process_payment_event
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +114,7 @@ def _build_payment_event(payment_entity: Dict[str, Any], raw_body: str) -> Payme
 )
 async def razorpay_webhook(
     request: Request,
+    background_tasks: BackgroundTasks,
     x_razorpay_signature: str = Header(
         ...,
         alias="x-razorpay-signature",
@@ -204,6 +207,17 @@ async def razorpay_webhook(
         event.customer_email,
         event.amount,
         event.status,
+    )
+
+    # ------------------------------------------------------------------ #
+    # 7. Schedule decision engine as a background task                     #
+    # The HTTP response (200) is sent to Razorpay *before* this runs,     #
+    # preventing gateway timeouts on slow diagnosis.                       #
+    # The engine opens its own session — safe after this request closes.  #
+    # ------------------------------------------------------------------ #
+    background_tasks.add_task(process_payment_event, event.id)
+    logger.info(
+        "Decision engine queued for PaymentEvent '%s'.", event.id
     )
 
     return JSONResponse(

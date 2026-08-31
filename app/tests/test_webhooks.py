@@ -13,6 +13,9 @@ Strategy:
     SQLite session so tests never touch the development database.
   • Patch ``app.core.config.settings.RAZORPAY_WEBHOOK_SECRET`` to a known
     test secret so we can generate valid HMAC signatures in-test.
+  • Mock ``process_payment_event`` so the background task doesn't attempt
+    to open the real engine — decision-engine logic is covered separately
+    in ``test_decision_engine.py``.
   • Use ``httpx.AsyncClient`` with ``ASGITransport`` to drive the real FastAPI app.
 """
 
@@ -20,7 +23,7 @@ import hashlib
 import hmac
 import json
 from typing import AsyncGenerator
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -178,7 +181,11 @@ async def test_valid_signature_payment_failed_persists_event(
     body = json.dumps(payload).encode()
     signature = _sign(body)
 
-    with patch("app.api.v1.endpoints.webhooks.settings") as mock_settings:
+    with patch("app.api.v1.endpoints.webhooks.settings") as mock_settings, \
+         patch(
+             "app.api.v1.endpoints.webhooks.process_payment_event",
+             new_callable=AsyncMock,
+         ) as mock_engine:
         mock_settings.RAZORPAY_WEBHOOK_SECRET = TEST_WEBHOOK_SECRET
 
         async with AsyncClient(
@@ -198,6 +205,9 @@ async def test_valid_signature_payment_failed_persists_event(
     data = response.json()
     assert data["status"] == "success"
     assert "event_id" in data
+
+    # Decision engine must have been scheduled exactly once
+    mock_engine.assert_called_once()
 
     # DB assertion — exactly one PaymentEvent must have been inserted
     result = await db_session.execute(select(PaymentEvent))
