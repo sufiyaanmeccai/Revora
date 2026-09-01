@@ -1,15 +1,22 @@
 """
 app/services/decision_engine.py
 --------------------------------
-Intelligent Decision Engine for the Revora Revenue Recovery Engine (Phase 7).
+Intelligent Decision Engine for the Revora Revenue Recovery Engine.
 
 Phase 7 pipeline (strict, bounded, auditable):
   1. Idempotency Check  — Skip terminal states (RECOVERED, ESCALATED_STOPPED).
   2. Diagnose           — Transition to DIAGNOSED. Run Recovery Agent.
   3. Guard              — Pass AgentDecision through GuardrailEngine.
   4. Execute            — Trigger OutreachService. Transition to INTERVENTION_ACTIVE.
-  5. Audit              — Write ONE comprehensive RecoveryAuditLog capturing the
-                          agent's raw reasoning AND the guardrail's validation outcome.
+  5. Audit              — Write ONE comprehensive InterventionAuditLog capturing
+                          structured AI fields AND the guardrail's validation outcome.
+
+Phase 8A changes:
+  • RecoveryAuditLog → InterventionAuditLog (backward-compat alias still works).
+  • audit.action_type → audit.executed_strategy.
+  • amount_recovered written to RecoveryWorkflow (not PaymentEvent).
+  • Structured AI columns: ai_recommended_strategy, ai_confidence, ai_reasoning.
+  • guardrail_decision: "APPROVED" | "OVERRIDDEN".
 
 Design principles:
   • The engine is idempotent — re-running for terminal states is a no-op.
@@ -36,7 +43,7 @@ from app.models.orm import (
     DiagnosedCause,
     PaymentEvent,
     PaymentStatus,
-    RecoveryAuditLog,
+    InterventionAuditLog,
     RecoveryStrategy,
     RecoveryWorkflow,
 )
@@ -377,22 +384,23 @@ async def _run_engine(
         action_type,
     )
 
-    # ── 10. Single comprehensive audit log ────────────────────────────────────
+    # ── 10. Single comprehensive audit log (Phase 8A structured fields) ────────
+    guardrail_overridden = (
+        raw_agent_decision.recommended_strategy != validated_decision.recommended_strategy
+    )
+    guardrail_decision_str = "OVERRIDDEN" if guardrail_overridden else "APPROVED"
+
     audit_metadata = {
         # Workflow context
         "diagnosed_cause":          diagnosis.cause.value,
         "workflow_strategy":        workflow.strategy.value,
         "max_steps":                diagnosis.max_steps,
-        # Agent layer
-        "agent_recommended_strategy": raw_agent_decision.recommended_strategy.value,
-        "agent_confidence_score":     raw_agent_decision.confidence_score,
-        "agent_requires_consent":     raw_agent_decision.requires_consent,
-        # Guardrail layer
+        # Guardrail layer (summary in metadata for JSON consumers)
         "guardrail_validated_strategy": validated_decision.recommended_strategy.value,
-        "guardrail_overridden":         (
-            raw_agent_decision.recommended_strategy != validated_decision.recommended_strategy
-        ),
+        "guardrail_overridden":         guardrail_overridden,
         "guardrail_requires_consent":   validated_decision.requires_consent,
+        # Agent consent flag
+        "agent_requires_consent":       raw_agent_decision.requires_consent,
         # Execution layer
         "outreach_action":  action_type,
         "outreach_channel": channel,
@@ -400,11 +408,16 @@ async def _run_engine(
         "outreach_result":  outreach_result,
     }
 
-    comprehensive_log = RecoveryAuditLog(
+    comprehensive_log = InterventionAuditLog(
         id=str(uuid.uuid4()),
         workflow_id=workflow.id,
         payment_event_id=event_id,
-        action_type="INTERVENTION_DISPATCHED",
+        # Phase 8A: renamed field + structured AI columns
+        executed_strategy="INTERVENTION_DISPATCHED",
+        ai_recommended_strategy=raw_agent_decision.recommended_strategy.value,
+        ai_confidence=raw_agent_decision.confidence_score,
+        ai_reasoning=raw_agent_decision.reasoning,
+        guardrail_decision=guardrail_decision_str,
         reasoning=(
             f"AGENT REASONING: {raw_agent_decision.reasoning} | "
             f"GUARDRAIL VALIDATION: {validated_decision.reasoning}"

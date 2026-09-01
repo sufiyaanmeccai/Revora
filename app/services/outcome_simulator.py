@@ -33,9 +33,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.policies import MAX_RETRIES
 from app.models.orm import (
+    InterventionAuditLog,
     PaymentEvent,
     PaymentStatus,
-    RecoveryAuditLog,
     RecoveryWorkflow,
 )
 
@@ -58,7 +58,7 @@ async def simulate_active_interventions(db: AsyncSession) -> Dict[str, int]:
     Probabilistically finalise all INTERVENTION_ACTIVE payment events.
 
     For each event:
-      • 65%: RECOVERED — set amount_recovered = event.amount, write success audit.
+      • 65%: RECOVERED — set workflow.amount_recovered = event.amount, write success audit.
       • 35%: Failure/Timeout — increment retry_count.
              If < MAX_RETRIES: stay INTERVENTION_ACTIVE (will be retried next fast-forward).
              If >= MAX_RETRIES: ESCALATED_STOPPED, write escalation audit.
@@ -114,16 +114,20 @@ async def simulate_active_interventions(db: AsyncSession) -> Dict[str, int]:
 
         if roll < SUCCESS_PROBABILITY:
             # ── SUCCESS PATH (65%) ────────────────────────────────────────────
-            event.status           = PaymentStatus.RECOVERED
-            event.amount_recovered = event.amount
-            workflow.is_active     = False
-            workflow.resolved_at   = now
+            event.status              = PaymentStatus.RECOVERED
+            workflow.amount_recovered = event.amount
+            workflow.is_active        = False
+            workflow.resolved_at      = now
 
-            audit = RecoveryAuditLog(
+            audit = InterventionAuditLog(
                 id=str(uuid.uuid4()),
                 workflow_id=workflow.id,
                 payment_event_id=event.id,
-                action_type="OUTCOME_SIMULATED_SUCCESS",
+                executed_strategy="OUTCOME_SIMULATED_SUCCESS",
+                ai_recommended_strategy=workflow.strategy.value,
+                ai_confidence=1.0,
+                ai_reasoning=f"Simulated payment.captured webhook received for {workflow.strategy.value}.",
+                guardrail_decision="APPROVED",
                 reasoning=(
                     "Simulated payment.captured webhook received. "
                     f"Customer responded to {workflow.strategy.value} outreach. "
@@ -160,11 +164,15 @@ async def simulate_active_interventions(db: AsyncSession) -> Dict[str, int]:
                 workflow.is_active = False
                 workflow.resolved_at = now
 
-                audit = RecoveryAuditLog(
+                audit = InterventionAuditLog(
                     id=str(uuid.uuid4()),
                     workflow_id=workflow.id,
                     payment_event_id=event.id,
-                    action_type="ESCALATED_STOPPED",
+                    executed_strategy="ESCALATED_STOPPED",
+                    ai_recommended_strategy=workflow.strategy.value,
+                    ai_confidence=1.0,
+                    ai_reasoning=f"Recovery attempts exhausted ({workflow.retry_count}/{MAX_RETRIES}).",
+                    guardrail_decision="APPROVED",
                     reasoning=(
                         f"Recovery attempts exhausted: retry_count={workflow.retry_count} "
                         f">= MAX_RETRIES={MAX_RETRIES}. "
@@ -193,11 +201,15 @@ async def simulate_active_interventions(db: AsyncSession) -> Dict[str, int]:
 
             else:
                 # Still within retry budget — keep INTERVENTION_ACTIVE
-                audit = RecoveryAuditLog(
+                audit = InterventionAuditLog(
                     id=str(uuid.uuid4()),
                     workflow_id=workflow.id,
                     payment_event_id=event.id,
-                    action_type="OUTCOME_SIMULATED_FAILURE",
+                    executed_strategy="OUTCOME_SIMULATED_FAILURE",
+                    ai_recommended_strategy=workflow.strategy.value,
+                    ai_confidence=1.0,
+                    ai_reasoning=f"Simulated outreach timeout. retry_count now {workflow.retry_count}/{MAX_RETRIES}.",
+                    guardrail_decision="APPROVED",
                     reasoning=(
                         f"Simulated outreach timeout. Customer did not respond. "
                         f"retry_count now {workflow.retry_count}/{MAX_RETRIES}. "

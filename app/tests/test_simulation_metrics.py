@@ -47,7 +47,14 @@ from sqlalchemy.ext.asyncio import (
 
 from app.core.database import get_db
 from app.main import app
-from app.models.orm import Base, PaymentEvent, PaymentStatus
+from app.models.orm import (
+    Base,
+    DiagnosedCause,
+    PaymentEvent,
+    PaymentStatus,
+    RecoveryStrategy,
+    RecoveryWorkflow,
+)
 
 # ---------------------------------------------------------------------------
 # Isolated in-memory test DB (one engine per test via factory)
@@ -114,10 +121,10 @@ METRICS_URL       = "/api/v1/metrics"
 def _seed_event(
     status: PaymentStatus = PaymentStatus.AT_RISK,
     amount: float = 999.0,
-    amount_recovered: float = 0.0,
 ) -> PaymentEvent:
     return PaymentEvent(
         id=str(uuid.uuid4()),
+        razorpay_event_id=f"evt_Test{uuid.uuid4().hex[:8]}",
         customer_id=f"cust_{uuid.uuid4().hex[:6]}",
         customer_name="Test User",
         customer_email="test@revora.ai",
@@ -127,7 +134,25 @@ def _seed_event(
         error_code="BAD_REQUEST_ERROR",
         error_reason="insufficient_funds",
         status=status,
+    )
+
+
+def _seed_workflow(
+    payment_event_id: str,
+    amount_recovered: float = 0.0,
+    is_active: bool = True,
+) -> RecoveryWorkflow:
+    return RecoveryWorkflow(
+        id=str(uuid.uuid4()),
+        payment_event_id=payment_event_id,
+        diagnosed_cause=DiagnosedCause.INSUFFICIENT_FUNDS_ADAPTIVE,
+        strategy=RecoveryStrategy.SILENT_MANDATE_RETRY,
+        current_step=1,
+        max_steps=3,
+        retry_count=0,
+        intervention_count=1,
         amount_recovered=amount_recovered,
+        is_active=is_active,
     )
 
 
@@ -266,6 +291,26 @@ async def test_fast_forward_with_no_active_events(
     assert data["resolved"] == 0
 
 
+async def test_fast_forward_resolves_active_events(
+    override_db: AsyncSession,
+) -> None:
+    """POST /simulation/fast-forward resolves INTERVENTION_ACTIVE events and creates audit logs."""
+    ev = _seed_event(PaymentStatus.INTERVENTION_ACTIVE, 500.0)
+    wf = _seed_workflow(ev.id, amount_recovered=0.0, is_active=True)
+    override_db.add_all([ev, wf])
+    await override_db.commit()
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(FAST_FORWARD_URL)
+
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["total_processed"] == 1
+    assert data["resolved"] + data["still_active"] == 1
+
+
 # ---------------------------------------------------------------------------
 # Metrics endpoint tests
 # ---------------------------------------------------------------------------
@@ -339,11 +384,14 @@ async def test_metrics_total_amount_at_risk_includes_all_inflight(
     override_db: AsyncSession,
 ) -> None:
     """total_amount_at_risk must sum AT_RISK + DIAGNOSED + INTERVENTION_ACTIVE amounts."""
+    ev_rec = _seed_event(PaymentStatus.RECOVERED, 800.0)
+    wf_rec = _seed_workflow(ev_rec.id, amount_recovered=800.0, is_active=False)
     override_db.add_all([
         _seed_event(PaymentStatus.AT_RISK,              1000.0),
         _seed_event(PaymentStatus.DIAGNOSED,            500.0),
         _seed_event(PaymentStatus.INTERVENTION_ACTIVE,  250.0),
-        _seed_event(PaymentStatus.RECOVERED,            800.0, amount_recovered=800.0),
+        ev_rec,
+        wf_rec,
     ])
     await override_db.commit()
 
@@ -360,11 +408,12 @@ async def test_metrics_total_amount_at_risk_includes_all_inflight(
 async def test_metrics_recovered_amount_uses_amount_recovered_field(
     override_db: AsyncSession,
 ) -> None:
-    """recovered_amount must use amount_recovered field, not raw amount."""
-    override_db.add_all([
-        _seed_event(PaymentStatus.RECOVERED, amount=1000.0, amount_recovered=1000.0),
-        _seed_event(PaymentStatus.RECOVERED, amount=500.0,  amount_recovered=500.0),
-    ])
+    """recovered_amount must sum RecoveryWorkflow.amount_recovered, not raw PaymentEvent amount."""
+    ev1 = _seed_event(PaymentStatus.RECOVERED, amount=1000.0)
+    wf1 = _seed_workflow(ev1.id, amount_recovered=1000.0, is_active=False)
+    ev2 = _seed_event(PaymentStatus.RECOVERED, amount=500.0)
+    wf2 = _seed_workflow(ev2.id, amount_recovered=500.0, is_active=False)
+    override_db.add_all([ev1, wf1, ev2, wf2])
     await override_db.commit()
 
     async with AsyncClient(
@@ -398,15 +447,19 @@ async def test_metrics_recovery_rate_calculation(
     override_db: AsyncSession,
 ) -> None:
     """
-    Phase 7 recovery_rate_pct = Recovered / (At Risk + Recovered) * 100.
+    Phase 7/8A recovery_rate_pct = Recovered / (At Risk + Recovered) * 100.
     3 recovered + 2 at-risk → 3/5 * 100 = 60.0%.
     """
+    ev1 = _seed_event(PaymentStatus.RECOVERED, 400.0)
+    wf1 = _seed_workflow(ev1.id, amount_recovered=400.0, is_active=False)
+    ev2 = _seed_event(PaymentStatus.RECOVERED, 400.0)
+    wf2 = _seed_workflow(ev2.id, amount_recovered=400.0, is_active=False)
+    ev3 = _seed_event(PaymentStatus.RECOVERED, 400.0)
+    wf3 = _seed_workflow(ev3.id, amount_recovered=400.0, is_active=False)
     override_db.add_all([
-        _seed_event(PaymentStatus.RECOVERED,    400.0, amount_recovered=400.0),
-        _seed_event(PaymentStatus.RECOVERED,    400.0, amount_recovered=400.0),
-        _seed_event(PaymentStatus.RECOVERED,    400.0, amount_recovered=400.0),
-        _seed_event(PaymentStatus.AT_RISK,      200.0),
-        _seed_event(PaymentStatus.AT_RISK,      200.0),
+        ev1, wf1, ev2, wf2, ev3, wf3,
+        _seed_event(PaymentStatus.AT_RISK, 200.0),
+        _seed_event(PaymentStatus.AT_RISK, 200.0),
     ])
     await override_db.commit()
 
@@ -430,3 +483,4 @@ async def test_metrics_action_breakdowns_is_list(
         response = await client.get(METRICS_URL)
 
     assert isinstance(response.json()["action_breakdowns"], list)
+

@@ -21,9 +21,9 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.orm import (
+    InterventionAuditLog,
     PaymentEvent,
     PaymentStatus,
-    RecoveryAuditLog,
     RecoveryWorkflow,
 )
 
@@ -44,7 +44,7 @@ async def calculate_recovery_metrics(db: AsyncSession) -> Dict[str, Any]:
       2. Amount sums — uses amount_recovered for RECOVERED events.
       3. RecoveryWorkflow grouped by diagnosed_cause.
       4. RecoveryWorkflow grouped by strategy.
-      5. RecoveryAuditLog action-type breakdown.
+      5. InterventionAuditLog executed_strategy breakdown.
 
     Returns:
         A dictionary matching the ``RecoverySummaryStats`` schema.
@@ -77,9 +77,9 @@ async def calculate_recovery_metrics(db: AsyncSession) -> Dict[str, Any]:
     async def _sum_recovered_amount() -> float:
         """Sum of amount_recovered for RECOVERED events (actual captured revenue)."""
         r = await db.execute(
-            select(func.coalesce(func.sum(PaymentEvent.amount_recovered), 0.0)).where(
-                PaymentEvent.status == PaymentStatus.RECOVERED
-            )
+            select(func.coalesce(func.sum(RecoveryWorkflow.amount_recovered), 0.0))
+            .join(PaymentEvent, RecoveryWorkflow.payment_event_id == PaymentEvent.id)
+            .where(PaymentEvent.status == PaymentStatus.RECOVERED)
         )
         return float(r.scalar() or 0.0)
 
@@ -126,17 +126,17 @@ async def calculate_recovery_metrics(db: AsyncSession) -> Dict[str, Any]:
         if row.strategy is not None
     }
 
-    # ── 6. Action-type breakdown (RecoveryAuditLog.action_type) ───────────────
+    # ── 6. Executed-strategy breakdown (InterventionAuditLog.executed_strategy) ────
     action_result = await db.execute(
         select(
-            RecoveryAuditLog.action_type,
-            func.count(RecoveryAuditLog.id).label("count"),
-        ).group_by(RecoveryAuditLog.action_type)
+            InterventionAuditLog.executed_strategy,
+            func.count(InterventionAuditLog.id).label("count"),
+        ).group_by(InterventionAuditLog.executed_strategy)
     )
     action_breakdowns: List[Dict[str, Any]] = [
-        {"action_type": row.action_type, "count": row.count}
+        {"action_type": row.executed_strategy, "count": row.count}
         for row in action_result.fetchall()
-        if row.action_type is not None
+        if row.executed_strategy is not None
     ]
 
     logger.info(

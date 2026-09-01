@@ -303,3 +303,77 @@ async def test_unhandled_event_type_returns_200_ignored(
     # DB must still be empty
     result = await db_session.execute(select(PaymentEvent))
     assert result.scalars().all() == []
+
+
+# ---------------------------------------------------------------------------
+# Test 4: Idempotency — duplicate x-razorpay-event-id returns 200 duplicate_event
+# ---------------------------------------------------------------------------
+
+async def test_idempotency_duplicate_event_id_returns_200_duplicate_event(
+    override_get_db, db_session: AsyncSession
+) -> None:
+    """
+    Sending the exact same x-razorpay-event-id twice must:
+      • Return HTTP 200 with status='success' on first receipt.
+      • Return HTTP 200 with status='ignored' and reason='duplicate_event' on second receipt.
+      • Retain exactly ONE PaymentEvent in the database (no duplicate records).
+      • Only queue the decision engine background task on the first call.
+    """
+    payload = _payment_failed_payload(payment_id="pay_Idempotent001")
+    body = json.dumps(payload).encode()
+    signature = _sign(body)
+    event_id_header = "evt_razorpay_duplicate_check_999"
+
+    with patch("app.api.v1.endpoints.webhooks.settings") as mock_settings, \
+         patch(
+             "app.api.v1.endpoints.webhooks.process_payment_event",
+             new_callable=AsyncMock,
+         ) as mock_engine:
+        mock_settings.RAZORPAY_WEBHOOK_SECRET = TEST_WEBHOOK_SECRET
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            # First delivery
+            response1 = await client.post(
+                WEBHOOK_URL,
+                content=body,
+                headers={
+                    "content-type": "application/json",
+                    "x-razorpay-signature": signature,
+                    "x-razorpay-event-id": event_id_header,
+                },
+            )
+
+            # Second delivery with identical event ID
+            response2 = await client.post(
+                WEBHOOK_URL,
+                content=body,
+                headers={
+                    "content-type": "application/json",
+                    "x-razorpay-signature": signature,
+                    "x-razorpay-event-id": event_id_header,
+                },
+            )
+
+    # First response checks
+    assert response1.status_code == 200, response1.text
+    data1 = response1.json()
+    assert data1["status"] == "success"
+    assert "event_id" in data1
+
+    # Second response checks (idempotent ignore)
+    assert response2.status_code == 200, response2.text
+    data2 = response2.json()
+    assert data2["status"] == "ignored"
+    assert data2["reason"] == "duplicate_event"
+
+    # Background decision engine must only have been queued once
+    assert mock_engine.call_count == 1
+
+    # Exactly 1 PaymentEvent record in DB
+    result = await db_session.execute(select(PaymentEvent))
+    events = result.scalars().all()
+    assert len(events) == 1
+    assert events[0].razorpay_event_id == event_id_header
+

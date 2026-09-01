@@ -41,9 +41,9 @@ from sqlalchemy.ext.asyncio import (
 from app.models.orm import (
     Base,
     DiagnosedCause,
+    InterventionAuditLog,
     PaymentEvent,
     PaymentStatus,
-    RecoveryAuditLog,
     RecoveryStrategy,
     RecoveryWorkflow,
 )
@@ -83,6 +83,7 @@ def _event(
 ) -> PaymentEvent:
     return PaymentEvent(
         id=str(uuid.uuid4()),
+        razorpay_event_id=f"evt_Test{uuid.uuid4().hex[:8]}",
         customer_id="cust_test",
         customer_name="Test User",
         customer_email="test@revora.ai",
@@ -235,9 +236,9 @@ async def test_idempotency_intervention_active_skipped() -> None:
 
 async def test_single_comprehensive_audit_log_created() -> None:
     """
-    Phase 7: A single INTERVENTION_DISPATCHED audit log must be created
+    Phase 7/8A: A single INTERVENTION_DISPATCHED audit log must be created
     per pipeline run (not two separate logs).
-    The log must contain agent reasoning AND guardrail outcome in metadata.
+    The log must contain structured AI fields and guardrail outcome.
     """
     eng, factory = _make_test_factory()
     await _bootstrap(eng)
@@ -251,16 +252,20 @@ async def test_single_comprehensive_audit_log_created() -> None:
 
     async with factory() as session:
         log_result = await session.execute(
-            select(RecoveryAuditLog).where(RecoveryAuditLog.payment_event_id == ev.id)
+            select(InterventionAuditLog).where(InterventionAuditLog.payment_event_id == ev.id)
         )
         logs = log_result.scalars().all()
 
     assert len(logs) == 1, (
-        f"Phase 7 requires exactly 1 comprehensive audit log per run, found {len(logs)}."
+        f"Phase 8A requires exactly 1 comprehensive audit log per run, found {len(logs)}."
     )
 
     log = logs[0]
-    assert log.action_type == "INTERVENTION_DISPATCHED"
+    # Phase 8A column check
+    assert log.executed_strategy == "INTERVENTION_DISPATCHED"
+    assert log.ai_recommended_strategy is not None
+    assert log.ai_confidence is not None
+    assert log.guardrail_decision in ("APPROVED", "OVERRIDDEN")
 
     # Reasoning must contain both agent and guardrail sections
     assert "AGENT REASONING" in log.reasoning, "Audit log must contain agent reasoning."
@@ -269,7 +274,7 @@ async def test_single_comprehensive_audit_log_created() -> None:
     # Metadata must contain all audit fields
     assert log.metadata_json is not None
     meta = json.loads(log.metadata_json)
-    assert "agent_recommended_strategy" in meta
+    assert "workflow_strategy" in meta
     assert "guardrail_validated_strategy" in meta
     assert "guardrail_overridden" in meta
     assert "outreach_action" in meta
@@ -314,10 +319,11 @@ async def test_card_declined_audit_log_metadata() -> None:
 
     async with factory() as session:
         log_result = await session.execute(
-            select(RecoveryAuditLog).where(RecoveryAuditLog.payment_event_id == ev.id)
+            select(InterventionAuditLog).where(InterventionAuditLog.payment_event_id == ev.id)
         )
         log = log_result.scalar_one()
 
+    assert log.executed_strategy == "INTERVENTION_DISPATCHED"
     meta = json.loads(log.metadata_json)
     assert meta["outreach_action"] == "WHATSAPP_NUDGE_SENT"
     assert meta["outreach_channel"] == "WHATSAPP"
@@ -359,13 +365,14 @@ async def test_guardrail_blocks_downgrade_for_low_ticket_in_pipeline() -> None:
     # Audit log must document the override
     async with factory() as session:
         log_result = await session.execute(
-            select(RecoveryAuditLog).where(RecoveryAuditLog.payment_event_id == ev.id)
+            select(InterventionAuditLog).where(InterventionAuditLog.payment_event_id == ev.id)
         )
         log = log_result.scalar_one()
 
+    assert log.guardrail_decision == "OVERRIDDEN"
+    assert log.ai_recommended_strategy == "ADAPTIVE_DOWNGRADE_OFFER"
+
     meta = json.loads(log.metadata_json)
-    # Agent originally recommended downgrade
-    assert meta["agent_recommended_strategy"] == "ADAPTIVE_DOWNGRADE_OFFER"
     # Guardrail overrode to secure link
     assert meta["guardrail_validated_strategy"] == "SECURE_PAYMENT_LINK"
     assert meta["guardrail_overridden"] is True
@@ -434,7 +441,9 @@ async def test_workflow_initial_state() -> None:
         )
         wf = wf_result.scalar_one()
 
-    assert wf.current_step == 1
-    assert wf.retry_count  == 0
-    assert wf.is_active    is True
-    assert wf.resolved_at  is None
+    assert wf.current_step      == 1
+    assert wf.retry_count       == 0
+    assert wf.is_active         is True
+    assert wf.resolved_at       is None
+    assert wf.amount_recovered  == 0.0
+

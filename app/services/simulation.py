@@ -121,6 +121,7 @@ async def generate_synthetic_batch(
 
         event = PaymentEvent(
             id=str(uuid.uuid4()),
+            razorpay_event_id=f"evt_SIM{uuid.uuid4().hex[:10].upper()}",
             razorpay_payment_id=f"pay_SIM{uuid.uuid4().hex[:10].upper()}",
             razorpay_order_id=f"order_SIM{uuid.uuid4().hex[:10].upper()}",
             razorpay_subscription_id=f"sub_SIM{uuid.uuid4().hex[:8].upper()}",

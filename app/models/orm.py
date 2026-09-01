@@ -4,9 +4,9 @@ app/models/orm.py
 SQLAlchemy 2.x ORM models for the Revora Revenue Recovery Engine.
 
 Models:
-  • PaymentEvent       — captures a failed payment with full customer context.
-  • RecoveryWorkflow   — orchestrates an AI-driven recovery strategy for an event.
-  • RecoveryAuditLog   — immutable audit trail of every recovery action taken.
+  • PaymentEvent          — captures a failed payment with full customer context.
+  • RecoveryWorkflow      — orchestrates an AI-driven recovery strategy for an event.
+  • InterventionAuditLog  — immutable, structured audit trail of every recovery action.
 
 All models share a common declarative Base and include:
   • id          — UUID string primary key (generated at Python level).
@@ -16,6 +16,17 @@ All models share a common declarative Base and include:
 Phase 7 changes:
   • PaymentStatus enum updated to strict bounded state machine states.
   • PaymentEvent gains amount_recovered and is_idempotent_lock columns.
+
+Phase 8A changes:
+  • PaymentEvent.razorpay_event_id — unique, indexed column for native DB-level
+    idempotency (replaces is_idempotent_lock row-lock approach).
+  • PaymentEvent.is_idempotent_lock removed.
+  • PaymentEvent.amount_recovered moved → RecoveryWorkflow.amount_recovered.
+  • RecoveryWorkflow.intervention_count added to separate workflow runs from pulses.
+  • RecoveryAuditLog renamed → InterventionAuditLog with structured AI/Guardrail fields.
+    - action_type renamed → executed_strategy.
+    - ai_recommended_strategy, ai_confidence, ai_reasoning, guardrail_decision added.
+  • RecoveryAuditLog kept as a compatibility alias (= InterventionAuditLog).
 """
 
 import enum
@@ -31,6 +42,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -111,11 +123,23 @@ class PaymentEvent(Base):
     Stores all customer-facing data, the error context returned by Razorpay,
     and the current recovery lifecycle status.
 
-    Phase 7 additions:
-      • amount_recovered      — amount actually captured after recovery (set on RECOVERED).
-      • is_idempotent_lock    — mutex flag to prevent concurrent processing race conditions.
+    Phase 8A:
+      • razorpay_event_id — Razorpay's native x-razorpay-event-id header value,
+        stored with a UNIQUE constraint to provide DB-level idempotency. A
+        duplicate webhook delivery will raise IntegrityError on INSERT, which the
+        webhook handler catches and turns into a 200 "ignored" response.
+      • is_idempotent_lock removed (replaced by the unique constraint above).
+      • amount_recovered moved to RecoveryWorkflow for per-workflow accounting.
     """
     __tablename__ = "payment_events"
+
+    # --- Phase 8A: Native Razorpay event ID for DB-level idempotency ---
+    razorpay_event_id: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+        unique=True,
+        index=True,
+    )
 
     # --- Razorpay identifiers ---
     razorpay_payment_id: Mapped[str | None] = mapped_column(
@@ -152,20 +176,6 @@ class PaymentEvent(Base):
         index=True,
     )
 
-    # --- Phase 7: Recovery outcome tracking ---
-    amount_recovered: Mapped[float] = mapped_column(
-        Float,
-        nullable=False,
-        default=0.0,
-    )
-
-    # --- Phase 7: Idempotency lock to prevent race conditions ---
-    is_idempotent_lock: Mapped[bool] = mapped_column(
-        Boolean,
-        nullable=False,
-        default=False,
-    )
-
     # --- Raw webhook payload ---
     raw_payload: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -173,7 +183,7 @@ class PaymentEvent(Base):
     workflows: Mapped[list["RecoveryWorkflow"]] = relationship(
         back_populates="payment_event", cascade="all, delete-orphan"
     )
-    audit_logs: Mapped[list["RecoveryAuditLog"]] = relationship(
+    audit_logs: Mapped[list["InterventionAuditLog"]] = relationship(
         back_populates="payment_event", cascade="all, delete-orphan"
     )
 
@@ -182,8 +192,7 @@ class PaymentEvent(Base):
             f"<PaymentEvent id={self.id!r} "
             f"customer={self.customer_email!r} "
             f"amount={self.amount} {self.currency} "
-            f"status={self.status!r} "
-            f"recovered={self.amount_recovered}>"
+            f"status={self.status!r}>"
         )
 
 
@@ -197,6 +206,11 @@ class RecoveryWorkflow(Base):
 
     The workflow progresses through numbered steps according to the selected
     strategy, with the AI agent deciding the next action at each step.
+
+    Phase 8A:
+      • amount_recovered    — INR amount captured by this workflow (moved from PaymentEvent).
+      • intervention_count  — number of discrete outreach pulses dispatched (separate
+                              from retry_count which tracks full workflow re-runs).
     """
     __tablename__ = "recovery_workflows"
 
@@ -223,6 +237,12 @@ class RecoveryWorkflow(Base):
     max_steps: Mapped[int]    = mapped_column(Integer, nullable=False, default=3)
     retry_count: Mapped[int]  = mapped_column(Integer, nullable=False, default=0)
 
+    # --- Phase 8A: Outreach pulse count (separate from retry_count) ---
+    intervention_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    # --- Phase 8A: Revenue recovered by this workflow ---
+    amount_recovered: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+
     # --- Scheduling ---
     next_action_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -236,7 +256,7 @@ class RecoveryWorkflow(Base):
 
     # --- Relationships ---
     payment_event: Mapped["PaymentEvent"] = relationship(back_populates="workflows")
-    audit_logs: Mapped[list["RecoveryAuditLog"]] = relationship(
+    audit_logs: Mapped[list["InterventionAuditLog"]] = relationship(
         back_populates="workflow", cascade="all, delete-orphan"
     )
 
@@ -246,23 +266,34 @@ class RecoveryWorkflow(Base):
             f"strategy={self.strategy!r} "
             f"step={self.current_step}/{self.max_steps} "
             f"retries={self.retry_count} "
+            f"interventions={self.intervention_count} "
+            f"recovered={self.amount_recovered} "
             f"active={self.is_active}>"
         )
 
 
 # --------------------------------------------------------------------------- #
-# RecoveryAuditLog                                                             #
+# InterventionAuditLog  (renamed from RecoveryAuditLog in Phase 8A)           #
 # --------------------------------------------------------------------------- #
 
-class RecoveryAuditLog(Base):
+class InterventionAuditLog(Base):
     """
-    Immutable audit record for every action taken by the recovery engine.
+    Immutable, structured audit record for every action taken by the recovery engine.
 
-    Phase 7: Each pipeline run emits a single comprehensive audit log that
-    captures the Agent's raw reasoning AND the Guardrail's validation outcome
-    in a unified metadata_json payload.
+    Phase 8A changes vs RecoveryAuditLog:
+      • Table renamed from ``recovery_audit_logs`` → ``intervention_audit_log``.
+      • ``action_type`` renamed → ``executed_strategy`` for technical honesty
+        (the column stores the strategy that was actually executed, not a generic
+        action type string).
+      • Dedicated structured columns for the AI and Guardrail decision trail:
+          - ai_recommended_strategy: what the LLM agent proposed.
+          - ai_confidence:           agent's confidence score (0.0–1.0).
+          - ai_reasoning:            agent's reasoning chain (full text).
+          - guardrail_decision:      "APPROVED" | "OVERRIDDEN" | "BLOCKED".
+      • ``metadata_json`` retained for arbitrary outreach result payloads.
+      • ``reasoning`` retained for the combined agent+guardrail reasoning string.
     """
-    __tablename__ = "recovery_audit_logs"
+    __tablename__ = "intervention_audit_log"
 
     # --- Foreign keys ---
     workflow_id: Mapped[str] = mapped_column(
@@ -278,10 +309,20 @@ class RecoveryAuditLog(Base):
         index=True,
     )
 
-    # --- Action descriptor ---
-    action_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    # --- Phase 8A: Strategy actually executed (renamed from action_type) ---
+    executed_strategy: Mapped[str] = mapped_column(
+        String(64), nullable=False, index=True
+    )
 
-    # --- LLM / rule reasoning ---
+    # --- Phase 8A: Structured AI decision audit ---
+    ai_recommended_strategy: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    ai_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ai_reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # --- Phase 8A: Guardrail outcome ---
+    guardrail_decision: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+    # --- Combined reasoning (agent + guardrail, for backward compat) ---
     reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # --- Communication channel ---
@@ -303,7 +344,18 @@ class RecoveryAuditLog(Base):
 
     def __repr__(self) -> str:
         return (
-            f"<RecoveryAuditLog id={self.id!r} "
-            f"action={self.action_type!r} "
+            f"<InterventionAuditLog id={self.id!r} "
+            f"executed_strategy={self.executed_strategy!r} "
+            f"guardrail={self.guardrail_decision!r} "
             f"channel={self.channel!r}>"
         )
+
+
+# --------------------------------------------------------------------------- #
+# Backward-compatibility alias                                                 #
+# --------------------------------------------------------------------------- #
+
+#: ``RecoveryAuditLog`` is preserved as a module-level alias so that any
+#: existing code still referencing the old name continues to work without
+#: modification. New code should use ``InterventionAuditLog`` directly.
+RecoveryAuditLog = InterventionAuditLog

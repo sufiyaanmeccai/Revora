@@ -4,11 +4,12 @@ app/tests/test_database.py
 Async pytest tests for the Revora ORM data layer.
 
 Test coverage:
-  1. init_db() creates all tables without errors.
-  2. PaymentEvent can be created and persisted.
-  3. RecoveryWorkflow can be linked to a PaymentEvent.
-  4. RecoveryAuditLog can be linked to both a Workflow and a PaymentEvent.
+  1. init_db() creates all tables without errors (payment_events, recovery_workflows, intervention_audit_log).
+  2. PaymentEvent can be created and persisted with razorpay_event_id.
+  3. RecoveryWorkflow can be linked to a PaymentEvent with amount_recovered & intervention_count.
+  4. InterventionAuditLog can be linked to both a Workflow and a PaymentEvent with structured AI fields.
   5. FK relationships resolve correctly on query.
+  6. Audit log filtering by executed_strategy.
 
 All tests use an isolated in-memory SQLite database so they never touch the
 development database file.
@@ -28,9 +29,9 @@ from sqlalchemy import select
 from app.models.orm import (
     Base,
     DiagnosedCause,
+    InterventionAuditLog,
     PaymentEvent,
     PaymentStatus,
-    RecoveryAuditLog,
     RecoveryStrategy,
     RecoveryWorkflow,
 )
@@ -62,6 +63,7 @@ def _make_payment_event(**overrides) -> PaymentEvent:
     """Factory for a valid PaymentEvent instance."""
     defaults = dict(
         id=str(uuid.uuid4()),
+        razorpay_event_id=f"evt_Test{uuid.uuid4().hex[:8]}",
         razorpay_payment_id="pay_TestABC123",
         razorpay_order_id="order_TestXYZ789",
         razorpay_subscription_id="sub_TestSUB001",
@@ -92,6 +94,8 @@ def _make_workflow(payment_event_id: str, **overrides) -> RecoveryWorkflow:
         current_step=1,
         max_steps=3,
         retry_count=0,
+        intervention_count=0,
+        amount_recovered=0.0,
         is_active=True,
     )
     defaults.update(overrides)
@@ -100,20 +104,24 @@ def _make_workflow(payment_event_id: str, **overrides) -> RecoveryWorkflow:
 
 def _make_audit_log(
     workflow_id: str, payment_event_id: str, **overrides
-) -> RecoveryAuditLog:
-    """Factory for a valid RecoveryAuditLog instance."""
+) -> InterventionAuditLog:
+    """Factory for a valid InterventionAuditLog instance."""
     defaults = dict(
         id=str(uuid.uuid4()),
         workflow_id=workflow_id,
         payment_event_id=payment_event_id,
-        action_type="SILENT_RETRY_SCHEDULED",
+        executed_strategy="SILENT_RETRY_SCHEDULED",
+        ai_recommended_strategy="SILENT_MANDATE_RETRY",
+        ai_confidence=0.95,
+        ai_reasoning="Insufficient funds detected; scheduling silent mandate retry.",
+        guardrail_decision="APPROVED",
         reasoning="Insufficient funds detected; scheduling silent mandate retry.",
         channel="SYSTEM",
         metadata_json='{"retry_window_minutes": 30}',
         timestamp=datetime.now(timezone.utc),
     )
     defaults.update(overrides)
-    return RecoveryAuditLog(**defaults)
+    return InterventionAuditLog(**defaults)
 
 
 # --------------------------------------------------------------------------- #
@@ -125,7 +133,7 @@ async def test_init_db_creates_tables() -> None:
     async with test_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-    # Verify the tables exist by querying the sqlite_master
+    # Verify the tables exist by querying sqlite_master
     from sqlalchemy import text
     async with TestAsyncSession() as session:
         result = await session.execute(
@@ -133,9 +141,9 @@ async def test_init_db_creates_tables() -> None:
         )
         tables = {row[0] for row in result.fetchall()}
 
-    assert "payment_events"     in tables, "payment_events table missing"
-    assert "recovery_workflows" in tables, "recovery_workflows table missing"
-    assert "recovery_audit_logs" in tables, "recovery_audit_logs table missing"
+    assert "payment_events"          in tables, "payment_events table missing"
+    assert "recovery_workflows"      in tables, "recovery_workflows table missing"
+    assert "intervention_audit_log"  in tables, "intervention_audit_log table missing"
 
 
 async def test_create_and_persist_payment_event() -> None:
@@ -143,7 +151,7 @@ async def test_create_and_persist_payment_event() -> None:
     async with test_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-    event = _make_payment_event()
+    event = _make_payment_event(razorpay_event_id="evt_TestUnique001")
 
     async with TestAsyncSession() as session:
         session.add(event)
@@ -153,20 +161,21 @@ async def test_create_and_persist_payment_event() -> None:
         fetched = await session.get(PaymentEvent, event.id)
 
     assert fetched is not None
-    assert fetched.id             == event.id
-    assert fetched.customer_email == "priya.sharma@example.com"
-    assert fetched.amount         == 999.00
-    assert fetched.status         == PaymentStatus.AT_RISK
-    assert fetched.currency       == "INR"
+    assert fetched.id                == event.id
+    assert fetched.razorpay_event_id == "evt_TestUnique001"
+    assert fetched.customer_email    == "priya.sharma@example.com"
+    assert fetched.amount            == 999.00
+    assert fetched.status            == PaymentStatus.AT_RISK
+    assert fetched.currency          == "INR"
 
 
 async def test_create_recovery_workflow_with_foreign_key() -> None:
-    """A RecoveryWorkflow linked to a PaymentEvent persists correctly."""
+    """A RecoveryWorkflow linked to a PaymentEvent persists correctly with Phase 8A fields."""
     async with test_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
     event    = _make_payment_event()
-    workflow = _make_workflow(event.id)
+    workflow = _make_workflow(event.id, amount_recovered=0.0, intervention_count=1)
 
     async with TestAsyncSession() as session:
         session.add(event)
@@ -177,15 +186,17 @@ async def test_create_recovery_workflow_with_foreign_key() -> None:
         fetched_wf = await session.get(RecoveryWorkflow, workflow.id)
 
     assert fetched_wf is not None
-    assert fetched_wf.payment_event_id == event.id
-    assert fetched_wf.strategy         == RecoveryStrategy.ADAPTIVE_DOWNGRADE_OFFER
-    assert fetched_wf.diagnosed_cause  == DiagnosedCause.INSUFFICIENT_FUNDS_ADAPTIVE
-    assert fetched_wf.is_active        is True
-    assert fetched_wf.max_steps        == 3
+    assert fetched_wf.payment_event_id   == event.id
+    assert fetched_wf.strategy           == RecoveryStrategy.ADAPTIVE_DOWNGRADE_OFFER
+    assert fetched_wf.diagnosed_cause    == DiagnosedCause.INSUFFICIENT_FUNDS_ADAPTIVE
+    assert fetched_wf.is_active          is True
+    assert fetched_wf.max_steps          == 3
+    assert fetched_wf.amount_recovered   == 0.0
+    assert fetched_wf.intervention_count == 1
 
 
 async def test_create_audit_log_with_foreign_keys() -> None:
-    """A RecoveryAuditLog with valid FK references can be persisted and retrieved."""
+    """An InterventionAuditLog with valid FK references and AI audit fields persists and is retrieved."""
     async with test_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
@@ -200,13 +211,16 @@ async def test_create_audit_log_with_foreign_keys() -> None:
         await session.commit()
 
     async with TestAsyncSession() as session:
-        fetched_log = await session.get(RecoveryAuditLog, audit_log.id)
+        fetched_log = await session.get(InterventionAuditLog, audit_log.id)
 
     assert fetched_log is not None
-    assert fetched_log.workflow_id      == workflow.id
-    assert fetched_log.payment_event_id == event.id
-    assert fetched_log.action_type      == "SILENT_RETRY_SCHEDULED"
-    assert fetched_log.channel          == "SYSTEM"
+    assert fetched_log.workflow_id             == workflow.id
+    assert fetched_log.payment_event_id        == event.id
+    assert fetched_log.executed_strategy       == "SILENT_RETRY_SCHEDULED"
+    assert fetched_log.ai_recommended_strategy == "SILENT_MANDATE_RETRY"
+    assert fetched_log.ai_confidence           == pytest.approx(0.95)
+    assert fetched_log.guardrail_decision      == "APPROVED"
+    assert fetched_log.channel                 == "SYSTEM"
 
 
 async def test_relationship_query_workflows_for_event() -> None:
@@ -236,16 +250,16 @@ async def test_relationship_query_workflows_for_event() -> None:
     assert RecoveryStrategy.SILENT_MANDATE_RETRY  in strategies
 
 
-async def test_audit_log_query_by_action_type() -> None:
-    """Audit logs can be filtered by action_type."""
+async def test_audit_log_query_by_executed_strategy() -> None:
+    """InterventionAuditLog entries can be filtered by executed_strategy."""
     async with test_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
     event    = _make_payment_event()
     workflow = _make_workflow(event.id)
-    log1     = _make_audit_log(workflow.id, event.id, action_type="PAYMENT_LINK_GENERATED")
-    log2     = _make_audit_log(workflow.id, event.id, action_type="WHATSAPP_NUDGE_SENT")
-    log3     = _make_audit_log(workflow.id, event.id, action_type="PAYMENT_CONFIRMED")
+    log1     = _make_audit_log(workflow.id, event.id, executed_strategy="PAYMENT_LINK_GENERATED")
+    log2     = _make_audit_log(workflow.id, event.id, executed_strategy="WHATSAPP_NUDGE_SENT")
+    log3     = _make_audit_log(workflow.id, event.id, executed_strategy="PAYMENT_CONFIRMED")
 
     async with TestAsyncSession() as session:
         session.add_all([event, workflow, log1, log2, log3])
@@ -253,11 +267,13 @@ async def test_audit_log_query_by_action_type() -> None:
 
     async with TestAsyncSession() as session:
         result = await session.execute(
-            select(RecoveryAuditLog).where(
-                RecoveryAuditLog.action_type == "WHATSAPP_NUDGE_SENT"
+            select(InterventionAuditLog).where(
+                InterventionAuditLog.executed_strategy == "WHATSAPP_NUDGE_SENT"
             )
         )
         nudges = result.scalars().all()
 
     assert len(nudges) == 1
     assert nudges[0].channel == "SYSTEM"
+    assert nudges[0].executed_strategy == "WHATSAPP_NUDGE_SENT"
+

@@ -7,16 +7,18 @@ Organised in layers:
   ① Core envelopes         — APIResponse, ErrorDetail (Phase 0)
   ② Payment domain         — PaymentEventCreate, PaymentEventRead
   ③ Recovery workflow      — RecoveryWorkflowCreate, RecoveryWorkflowRead
-  ④ Audit log              — AuditLogCreate, AuditLogRead
+  ④ Audit log              — InterventionAuditLogRead (Phase 8A rename)
   ⑤ Agent decision         — AgentDecision (Phase 7)
   ⑥ Analytics              — RecoverySummaryStats
 
-Phase 7 changes:
-  • PaymentStatus now has 5 bounded states (AT_RISK, DIAGNOSED,
-    INTERVENTION_ACTIVE, RECOVERED, ESCALATED_STOPPED).
-  • PaymentEventRead gains amount_recovered and is_idempotent_lock.
-  • AgentDecision Pydantic model added for LLM structured output.
-  • RecoverySummaryStats updated to reflect new state groupings.
+Phase 8A changes:
+  • PaymentEventRead:  razorpay_event_id added, is_idempotent_lock removed,
+    amount_recovered removed (moved to RecoveryWorkflowRead).
+  • RecoveryWorkflowRead: amount_recovered + intervention_count added.
+  • AuditLogRead renamed → InterventionAuditLogRead:
+    - executed_strategy replaces action_type.
+    - ai_recommended_strategy, ai_confidence, ai_reasoning, guardrail_decision added.
+  • AuditLogRead kept as alias for backward compat.
 """
 
 from __future__ import annotations
@@ -98,6 +100,7 @@ class PaymentEventCreate(BaseModel):
     """Fields required to ingest a new failed payment event."""
 
     # Razorpay identifiers (all optional — may not exist for abandoned checkouts)
+    razorpay_event_id:        Optional[str] = None
     razorpay_payment_id:      Optional[str] = None
     razorpay_order_id:        Optional[str] = None
     razorpay_subscription_id: Optional[str] = None
@@ -132,9 +135,18 @@ class PaymentEventCreate(BaseModel):
 
 
 class PaymentEventRead(BaseModel):
-    """Full ORM-backed representation of a PaymentEvent (returned by the API)."""
+    """
+    Full ORM-backed representation of a PaymentEvent (returned by the API).
+
+    Phase 8A:
+      • razorpay_event_id added.
+      • is_idempotent_lock removed.
+      • amount_recovered removed (now on RecoveryWorkflowRead).
+    """
 
     id:                       str
+    # Phase 8A: native event ID for idempotency
+    razorpay_event_id:        Optional[str] = None
     razorpay_payment_id:      Optional[str] = None
     razorpay_order_id:        Optional[str] = None
     razorpay_subscription_id: Optional[str] = None
@@ -149,9 +161,6 @@ class PaymentEventRead(BaseModel):
     error_source:             Optional[str] = None
     error_reason:             Optional[str] = None
     status:                   PaymentStatus
-    # Phase 7: outcome tracking
-    amount_recovered:         float = 0.0
-    is_idempotent_lock:       bool = False
     raw_payload:              Optional[str] = None
     created_at:               datetime
     updated_at:               datetime
@@ -175,7 +184,13 @@ class RecoveryWorkflowCreate(BaseModel):
 
 
 class RecoveryWorkflowRead(BaseModel):
-    """Full ORM-backed representation of a RecoveryWorkflow."""
+    """
+    Full ORM-backed representation of a RecoveryWorkflow.
+
+    Phase 8A:
+      • amount_recovered added (moved from PaymentEventRead).
+      • intervention_count added.
+    """
 
     id:               str
     payment_event_id: str
@@ -184,6 +199,9 @@ class RecoveryWorkflowRead(BaseModel):
     current_step:     int
     max_steps:        int
     retry_count:      int
+    # Phase 8A fields
+    intervention_count: int = 0
+    amount_recovered:   float = 0.0
     next_action_at:   Optional[datetime] = None
     resolved_at:      Optional[datetime] = None
     is_active:        bool
@@ -194,42 +212,33 @@ class RecoveryWorkflowRead(BaseModel):
 
 
 # --------------------------------------------------------------------------- #
-# AuditLog schemas                                                             #
+# InterventionAuditLog schemas  (Phase 8A rename from AuditLog)               #
 # --------------------------------------------------------------------------- #
 
-class AuditLogCreate(BaseModel):
-    """Fields required to append an audit record to the recovery trail."""
+class InterventionAuditLogRead(BaseModel):
+    """
+    Full ORM-backed representation of an InterventionAuditLog.
 
-    workflow_id:      str
-    payment_event_id: str
-    action_type:      str = Field(
-        description=(
-            "One of: INTERVENTION_DISPATCHED, PAYMENT_CONFIRMED, "
-            "OUTCOME_SIMULATED_SUCCESS, OUTCOME_SIMULATED_FAILURE, "
-            "ESCALATED_STOPPED"
-        )
-    )
-    reasoning:     Optional[str] = None
-    channel:       str           = Field(default="SYSTEM")
-    metadata_json: Optional[Any] = None
-
-    @field_validator("metadata_json", mode="before")
-    @classmethod
-    def serialise_metadata(cls, v: Any) -> Optional[str]:
-        if v is None:
-            return None
-        return v if isinstance(v, str) else json.dumps(v)
-
-    model_config = ConfigDict(str_strip_whitespace=True)
-
-
-class AuditLogRead(BaseModel):
-    """Full ORM-backed representation of a RecoveryAuditLog."""
+    Phase 8A:
+      • executed_strategy replaces action_type.
+      • Structured AI/Guardrail columns: ai_recommended_strategy, ai_confidence,
+        ai_reasoning, guardrail_decision.
+    """
 
     id:               str
     workflow_id:      str
     payment_event_id: str
-    action_type:      str
+
+    # Phase 8A: strategy actually executed
+    executed_strategy:        str
+
+    # Phase 8A: structured AI audit
+    ai_recommended_strategy:  Optional[str]   = None
+    ai_confidence:            Optional[float] = None
+    ai_reasoning:             Optional[str]   = None
+    guardrail_decision:       Optional[str]   = None
+
+    # Combined reasoning (backward compat)
     reasoning:        Optional[str] = None
     channel:          str
     metadata_json:    Optional[str] = None
@@ -239,14 +248,18 @@ class AuditLogRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+#: Backward-compatibility alias
+AuditLogRead = InterventionAuditLogRead
+
+
 # --------------------------------------------------------------------------- #
 # Analytics / reporting                                                        #
 # --------------------------------------------------------------------------- #
 
 class ActionBreakdown(BaseModel):
-    """Count of audit log entries per action type."""
+    """Count of audit log entries per executed_strategy."""
 
-    action_type: str
+    action_type: str   # kept as "action_type" for API stability
     count:       int
 
 
@@ -257,10 +270,12 @@ class RecoverySummaryStats(BaseModel):
     Phase 7 state groupings:
       • "At Risk" = AT_RISK + DIAGNOSED + INTERVENTION_ACTIVE
         (all events not yet in a terminal state).
-      • "Recovered" = RECOVERED (terminal success, uses amount_recovered).
+      • "Recovered" = RECOVERED (terminal success).
       • "Escalated" = ESCALATED_STOPPED (terminal failure).
 
-    Returned by the analytics endpoint to summarise engine performance.
+    Phase 8A:
+      • recovered_amount now sums RecoveryWorkflow.amount_recovered
+        (moved from PaymentEvent).
     """
 
     # --- Phase 7 state counts ---
@@ -276,11 +291,11 @@ class RecoverySummaryStats(BaseModel):
     # --- Revenue metrics ---
     recovery_rate_pct:      float = Field(description="Recovered / (At Risk + Recovered) × 100")
     total_amount_at_risk:   float = Field(description="Sum of amounts for AT_RISK+DIAGNOSED+INTERVENTION_ACTIVE (INR)")
-    recovered_amount:       float = Field(description="Sum of amount_recovered for RECOVERED events (INR)")
+    recovered_amount:       float = Field(description="Sum of workflow.amount_recovered for RECOVERED events (INR)")
 
     action_breakdowns:      List[ActionBreakdown] = Field(
         default_factory=list,
-        description="Per-action-type audit log counts",
+        description="Per-strategy audit log counts",
     )
     cause_breakdown:        Dict[str, int] = Field(
         default_factory=dict,
