@@ -1,25 +1,20 @@
 """
 app/services/decision_engine.py
 --------------------------------
-Intelligent Decision Engine for the Revora Revenue Recovery Engine.
+Intelligent Decision Engine for the Revora Revenue Recovery Engine (Phase 7).
 
-This module forms the core of Revora's autonomous recovery logic.
-
-Responsibilities:
-  1. Retrieve a failed PaymentEvent by ID.
-  2. Diagnose the root cause using a deterministic rule engine that inspects
-     Razorpay error codes and error reasons.
-  3. Select the optimal recovery strategy based on the diagnosed cause and
-     the payment amount (ticket-size segmentation).
-  4. Atomically:
-       • Transition PaymentEvent.status → IN_RECOVERY.
-       • Create a RecoveryWorkflow record.
-       • Append a RecoveryAuditLog documenting the reasoning.
+Phase 7 pipeline (strict, bounded, auditable):
+  1. Idempotency Check  — Skip terminal states (RECOVERED, ESCALATED_STOPPED).
+  2. Diagnose           — Transition to DIAGNOSED. Run Recovery Agent.
+  3. Guard              — Pass AgentDecision through GuardrailEngine.
+  4. Execute            — Trigger OutreachService. Transition to INTERVENTION_ACTIVE.
+  5. Audit              — Write ONE comprehensive RecoveryAuditLog capturing the
+                          agent's raw reasoning AND the guardrail's validation outcome.
 
 Design principles:
-  • The engine is intentionally *deterministic* in Phase 3 so the logic is
-    fully testable and auditable.  LLM-driven diagnosis is layered on top
-    in Phase 4.
+  • The engine is idempotent — re-running for terminal states is a no-op.
+  • The GuardrailEngine may override the agent's decision; both the original
+    and validated decisions are logged for full traceability.
   • ``process_payment_event`` manages its own DB session so it can safely run
     as a FastAPI BackgroundTask after the originating HTTP session closes.
 """
@@ -29,13 +24,14 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.agents.recovery_agent import analyze_failure_context
+from app.core.policies import MAX_RETRIES, guardrail_engine
 from app.models.orm import (
     DiagnosedCause,
     PaymentEvent,
@@ -44,19 +40,28 @@ from app.models.orm import (
     RecoveryStrategy,
     RecoveryWorkflow,
 )
+from app.models.schemas import AgentDecision
 from app.services.outreach import OutreachService
 from app.services.razorpay_client import RazorpayService
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Ticket-size threshold (INR) for strategy branching on insufficient funds
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- #
+# Terminal states — idempotency check                                          #
+# --------------------------------------------------------------------------- #
+_TERMINAL_STATES: frozenset[PaymentStatus] = frozenset({
+    PaymentStatus.RECOVERED,
+    PaymentStatus.ESCALATED_STOPPED,
+})
+
+# --------------------------------------------------------------------------- #
+# Ticket-size threshold (INR) — kept for backward-compatible _diagnose()      #
+# --------------------------------------------------------------------------- #
 HIGH_TICKET_THRESHOLD_INR: float = 500.0
 
-# ---------------------------------------------------------------------------
-# Keyword sets used by the rule engine (lower-cased for case-insensitive match)
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- #
+# Keyword sets used by the legacy rule engine                                  #
+# --------------------------------------------------------------------------- #
 _NETWORK_CODES = {
     "gateway_error", "gateway_timeout", "upstream_timeout",
     "bank_offline", "timeout", "connection_error", "network_error",
@@ -65,29 +70,29 @@ _NETWORK_REASONS = {
     "timeout", "bank_offline", "gateway_timeout",
     "upstream_timeout", "network_error",
 }
-
 _CARD_CODES = {
-    "bad_request_error",  # frequently used for card-level declines
+    "bad_request_error",
 }
 _CARD_REASONS = {
     "invalid_card", "expired_card", "card_declined",
     "card_error", "invalid_instrument", "do_not_honour",
     "card_expired", "invalid_cvv",
 }
-
 _FUNDS_REASONS = {
     "insufficient_funds", "low_balance", "credit_limit_reached",
     "credit_limit", "not_sufficient_funds",
 }
-
 _ABANDONED_REASONS = {
     "checkout_abandoned", "payment_not_completed", "user_cancelled",
 }
 
 
-# ---------------------------------------------------------------------------
-# Diagnosis result dataclass
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- #
+# Legacy diagnosis helper (preserved for direct unit-test coverage)           #
+# --------------------------------------------------------------------------- #
+from dataclasses import dataclass
+
+
 @dataclass(frozen=True)
 class DiagnosisResult:
     cause:     DiagnosedCause
@@ -96,9 +101,6 @@ class DiagnosisResult:
     max_steps: int = 3
 
 
-# ---------------------------------------------------------------------------
-# Rule engine
-# ---------------------------------------------------------------------------
 def _diagnose(
     error_code:   str,
     error_reason: str,
@@ -108,20 +110,14 @@ def _diagnose(
     Apply a priority-ordered rule table to determine the root cause and
     recovery strategy for a failed payment.
 
-    Rules are evaluated top-to-bottom; the first match wins.
-
-    Args:
-        error_code:   Razorpay ``error_code`` field (e.g. ``GATEWAY_ERROR``).
-        error_reason: Razorpay ``error_reason`` field (e.g. ``timeout``).
-        amount_inr:   Payment amount in INR (used for ticket-size branching).
-
-    Returns:
-        A frozen ``DiagnosisResult`` with cause, strategy, reasoning, and max_steps.
+    This function is preserved for unit-test compatibility and is used to
+    populate the RecoveryWorkflow's diagnosed_cause and initial strategy.
+    The Phase 7 agent layer then re-evaluates with richer context.
     """
     code   = (error_code   or "").lower().strip()
     reason = (error_reason or "").lower().strip()
 
-    # ── Rule 1: Network / Gateway failure ───────────────────────────────────
+    # ── Rule 1: Network / Gateway failure ────────────────────────────────────
     if code in _NETWORK_CODES or reason in _NETWORK_REASONS:
         return DiagnosisResult(
             cause=DiagnosedCause.TEMPORARY_NETWORK_FAILURE,
@@ -134,7 +130,7 @@ def _diagnose(
             max_steps=3,
         )
 
-    # ── Rule 2: Card / Instrument issues ────────────────────────────────────
+    # ── Rule 2: Card / Instrument issues ─────────────────────────────────────
     if reason in _CARD_REASONS:
         return DiagnosisResult(
             cause=DiagnosedCause.EXPIRED_PAYMENT_METHOD,
@@ -147,7 +143,7 @@ def _diagnose(
             max_steps=3,
         )
 
-    # ── Rule 3: Insufficient funds — ticket-size branching ──────────────────
+    # ── Rule 3: Insufficient funds — ticket-size branching ───────────────────
     if reason in _FUNDS_REASONS:
         if amount_inr >= HIGH_TICKET_THRESHOLD_INR:
             return DiagnosisResult(
@@ -184,7 +180,7 @@ def _diagnose(
             max_steps=2,
         )
 
-    # ── Rule 5: Default fallback ─────────────────────────────────────────────
+    # ── Rule 5: Default fallback ──────────────────────────────────────────────
     return DiagnosisResult(
         cause=DiagnosedCause.MANDATE_DECLINED,
         strategy=RecoveryStrategy.SECURE_PAYMENT_LINK,
@@ -198,16 +194,17 @@ def _diagnose(
     )
 
 
-# ---------------------------------------------------------------------------
-# Core processing function (self-contained session lifecycle)
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- #
+# Core processing function (self-contained session lifecycle)                  #
+# --------------------------------------------------------------------------- #
+
 async def process_payment_event(
     event_id: str,
     _session_factory: Optional[Callable[[], async_sessionmaker]] = None,
     _outreach_service: Optional[OutreachService] = None,
 ) -> None:
     """
-    Run the decision engine for a given PaymentEvent ID.
+    Run the Phase 7 decision engine for a given PaymentEvent ID.
 
     This function is designed to run as a FastAPI ``BackgroundTask``.
     It creates and manages its own database session so it is completely
@@ -234,17 +231,24 @@ async def _run_engine(
     outreach_service: Optional[OutreachService] = None,
 ) -> None:
     """
-    Core engine logic operating inside an existing AsyncSession.
+    Phase 7 engine logic operating inside an existing AsyncSession.
 
-    Separated from ``process_payment_event`` so it can be unit-tested
-    directly by injecting a session and outreach service.
+    Pipeline:
+      1. Idempotency check (RECOVERED / ESCALATED_STOPPED → skip)
+      2. Transition → DIAGNOSED
+      3. Recovery Agent → AgentDecision (simulated LLM structured output)
+      4. GuardrailEngine.validate_agent_decision() → validated AgentDecision
+      5. Create RecoveryWorkflow
+      6. Execute outreach → transition to INTERVENTION_ACTIVE
+      7. Write single comprehensive RecoveryAuditLog
+      8. Commit atomically
     """
     if outreach_service is None:
         outreach_service = OutreachService()
 
     razorpay = RazorpayService()
 
-    # ── 1. Fetch PaymentEvent ────────────────────────────────────────────────
+    # ── 1. Fetch PaymentEvent ─────────────────────────────────────────────────
     result = await db.execute(
         select(PaymentEvent).where(PaymentEvent.id == event_id)
     )
@@ -256,37 +260,66 @@ async def _run_engine(
         )
         return
 
-    if event.status != PaymentStatus.AT_RISK:
+    # ── 2. Idempotency check ──────────────────────────────────────────────────
+    if event.status in _TERMINAL_STATES:
         logger.info(
-            "Decision engine: PaymentEvent '%s' is already in status '%s' — skipping.",
+            "Decision engine: PaymentEvent '%s' is already in terminal state '%s' — skipping.",
             event_id,
-            event.status,
+            event.status.value,
         )
         return
 
-    # ── 2. Diagnose root cause ────────────────────────────────────────────────
+    if event.status == PaymentStatus.INTERVENTION_ACTIVE:
+        logger.info(
+            "Decision engine: PaymentEvent '%s' already has INTERVENTION_ACTIVE — skipping.",
+            event_id,
+        )
+        return
+
+    # ── 3. Transition → DIAGNOSED ─────────────────────────────────────────────
+    event.status = PaymentStatus.DIAGNOSED
+    logger.info("Decision engine: PaymentEvent '%s' → DIAGNOSED", event_id)
+
+    # ── 4. Root-cause diagnosis (deterministic, populates workflow fields) ────
     diagnosis = _diagnose(
-        error_code=event.error_code   or "",
+        error_code=event.error_code or "",
         error_reason=event.error_reason or "",
         amount_inr=event.amount,
     )
 
+    # ── 5. Recovery Agent → raw AgentDecision ────────────────────────────────
+    raw_agent_decision: AgentDecision = await analyze_failure_context(event)
+
     logger.info(
-        "Decision engine: PaymentEvent '%s' diagnosed as %s → strategy %s",
+        "Decision engine: Agent decision for '%s': strategy=%s confidence=%.2f",
         event_id,
-        diagnosis.cause.value,
-        diagnosis.strategy.value,
+        raw_agent_decision.recommended_strategy.value,
+        raw_agent_decision.confidence_score,
     )
 
-    # ── 3. Transition PaymentEvent status ─────────────────────────────────────
-    event.status = PaymentStatus.IN_RECOVERY
+    # ── 6. GuardrailEngine → validated AgentDecision ─────────────────────────
+    # Create a stub workflow to pass retry_count — actual workflow created below
+    class _WorkflowStub:
+        retry_count = 0
 
-    # ── 4. Create RecoveryWorkflow ────────────────────────────────────────────
+    validated_decision: AgentDecision = guardrail_engine.validate_agent_decision(
+        raw_agent_decision,
+        event,
+        _WorkflowStub(),  # type: ignore[arg-type]
+    )
+
+    logger.info(
+        "Decision engine: Guardrail-validated decision for '%s': strategy=%s",
+        event_id,
+        validated_decision.recommended_strategy.value,
+    )
+
+    # ── 7. Create RecoveryWorkflow ────────────────────────────────────────────
     workflow = RecoveryWorkflow(
         id=str(uuid.uuid4()),
         payment_event_id=event_id,
         diagnosed_cause=diagnosis.cause,
-        strategy=diagnosis.strategy,
+        strategy=validated_decision.recommended_strategy,
         current_step=1,
         max_steps=diagnosis.max_steps,
         retry_count=0,
@@ -297,29 +330,11 @@ async def _run_engine(
     # Flush so workflow.id is available for the audit log FK
     await db.flush()
 
-    # ── 5. Audit log #1 — WORKFLOW_INITIATED ──────────────────────────────────
-    diagnosis_log = RecoveryAuditLog(
-        id=str(uuid.uuid4()),
-        workflow_id=workflow.id,
-        payment_event_id=event_id,
-        action_type="WORKFLOW_INITIATED",
-        reasoning=diagnosis.reasoning,
-        channel="SYSTEM",
-        metadata_json=json.dumps({
-            "diagnosed_cause": diagnosis.cause.value,
-            "strategy":        diagnosis.strategy.value,
-            "max_steps":       diagnosis.max_steps,
-        }),
-        timestamp=datetime.now(timezone.utc),
-    )
-    db.add(diagnosis_log)
-
-    # ── 6. Execute outreach strategy ──────────────────────────────────────────
+    # ── 8. Execute outreach strategy ──────────────────────────────────────────
+    strategy = validated_decision.recommended_strategy
     outreach_result: Dict[str, Any]
-    action_type:     str
-    channel:         str
-
-    strategy = diagnosis.strategy
+    action_type: str
+    channel: str
 
     if strategy in (RecoveryStrategy.SECURE_PAYMENT_LINK, RecoveryStrategy.UPI_AUTOPAY_MIGRATION):
         link = await razorpay.generate_payment_link(
@@ -354,34 +369,61 @@ async def _run_engine(
         action_type     = "SILENT_RETRY_SCHEDULED"
         channel         = "SYSTEM"
 
+    # ── 9. Transition → INTERVENTION_ACTIVE ──────────────────────────────────
+    event.status = PaymentStatus.INTERVENTION_ACTIVE
     logger.info(
-        "Decision engine: outreach dispatched for PaymentEvent '%s' | "
-        "action=%s | status=%s",
+        "Decision engine: PaymentEvent '%s' → INTERVENTION_ACTIVE | action=%s",
         event_id,
         action_type,
-        outreach_result.get("status"),
     )
 
-    # ── 7. Audit log #2 — executed outreach action ────────────────────────────
-    execution_log = RecoveryAuditLog(
+    # ── 10. Single comprehensive audit log ────────────────────────────────────
+    audit_metadata = {
+        # Workflow context
+        "diagnosed_cause":          diagnosis.cause.value,
+        "workflow_strategy":        workflow.strategy.value,
+        "max_steps":                diagnosis.max_steps,
+        # Agent layer
+        "agent_recommended_strategy": raw_agent_decision.recommended_strategy.value,
+        "agent_confidence_score":     raw_agent_decision.confidence_score,
+        "agent_requires_consent":     raw_agent_decision.requires_consent,
+        # Guardrail layer
+        "guardrail_validated_strategy": validated_decision.recommended_strategy.value,
+        "guardrail_overridden":         (
+            raw_agent_decision.recommended_strategy != validated_decision.recommended_strategy
+        ),
+        "guardrail_requires_consent":   validated_decision.requires_consent,
+        # Execution layer
+        "outreach_action":  action_type,
+        "outreach_channel": channel,
+        "outreach_status":  outreach_result.get("status"),
+        "outreach_result":  outreach_result,
+    }
+
+    comprehensive_log = RecoveryAuditLog(
         id=str(uuid.uuid4()),
         workflow_id=workflow.id,
         payment_event_id=event_id,
-        action_type=action_type,
-        reasoning=f"Strategy {strategy.value} executed. Result: {outreach_result.get('status')}.",
+        action_type="INTERVENTION_DISPATCHED",
+        reasoning=(
+            f"AGENT REASONING: {raw_agent_decision.reasoning} | "
+            f"GUARDRAIL VALIDATION: {validated_decision.reasoning}"
+        ),
         channel=channel,
-        metadata_json=json.dumps(outreach_result, default=str),
+        metadata_json=json.dumps(audit_metadata, default=str),
         timestamp=datetime.now(timezone.utc),
     )
-    db.add(execution_log)
+    db.add(comprehensive_log)
 
-    # ── 8. Commit atomically ──────────────────────────────────────────────────
+    # ── 11. Commit atomically ─────────────────────────────────────────────────
     await db.commit()
 
     logger.info(
         "Decision engine: Workflow '%s' created for PaymentEvent '%s'. "
-        "Status: AT_RISK → IN_RECOVERY. Action: %s.",
+        "AT_RISK → DIAGNOSED → INTERVENTION_ACTIVE. Action: %s. "
+        "Guardrail override: %s.",
         workflow.id,
         event_id,
         action_type,
+        audit_metadata["guardrail_overridden"],
     )

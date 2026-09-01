@@ -3,11 +3,13 @@ app/services/metrics.py
 ------------------------
 Recovery metrics aggregation service for the Revora Revenue Recovery Engine.
 
-Computes dashboard-ready metrics by aggregating across PaymentEvent statuses,
-RecoveryWorkflow diagnoses/strategies, and RecoveryAuditLog action types.
-
-Returned dict matches the ``RecoverySummaryStats`` Pydantic schema so it can
-be serialised directly by the /api/v1/metrics endpoint.
+Phase 7 changes:
+  • Revenue/Events "At Risk" = AT_RISK + DIAGNOSED + INTERVENTION_ACTIVE
+    (all non-terminal, in-flight states).
+  • Revenue Recovered = sum of amount_recovered where status = RECOVERED.
+  • Recovery rate = Recovered / (At Risk + Recovered) * 100 (safe division).
+  • New state fields: total_diagnosed, total_intervention, total_escalated.
+  • total_in_recovery = DIAGNOSED + INTERVENTION_ACTIVE (for dashboard display).
 """
 
 from __future__ import annotations
@@ -32,24 +34,38 @@ async def calculate_recovery_metrics(db: AsyncSession) -> Dict[str, Any]:
     """
     Aggregate recovery performance metrics from the database.
 
+    Phase 7 state model:
+      In-flight (at risk of loss):  AT_RISK, DIAGNOSED, INTERVENTION_ACTIVE
+      Terminal success:              RECOVERED
+      Terminal failure:              ESCALATED_STOPPED
+
     Queries:
-      1. PaymentEvent status counts and amount sums.
-      2. RecoveryWorkflow grouped by diagnosed_cause.
-      3. RecoveryWorkflow grouped by strategy.
-      4. RecoveryAuditLog action-type breakdown.
+      1. PaymentEvent status counts.
+      2. Amount sums — uses amount_recovered for RECOVERED events.
+      3. RecoveryWorkflow grouped by diagnosed_cause.
+      4. RecoveryWorkflow grouped by strategy.
+      5. RecoveryAuditLog action-type breakdown.
 
     Returns:
-        A dictionary matching the ``RecoverySummaryStats`` schema, extended
-        with ``cause_breakdown`` and ``strategy_breakdown`` dicts for
-        internal use (filtered by Pydantic on the API layer).
+        A dictionary matching the ``RecoverySummaryStats`` schema.
     """
-    # ── 1. Status counts ─────────────────────────────────────────────────────
+    # ── 1. Status counts ──────────────────────────────────────────────────────
     async def _count_status(status: PaymentStatus) -> int:
         r = await db.execute(
             select(func.count(PaymentEvent.id)).where(PaymentEvent.status == status)
         )
         return r.scalar() or 0
 
+    total_at_risk      = await _count_status(PaymentStatus.AT_RISK)
+    total_diagnosed    = await _count_status(PaymentStatus.DIAGNOSED)
+    total_intervention = await _count_status(PaymentStatus.INTERVENTION_ACTIVE)
+    total_recovered    = await _count_status(PaymentStatus.RECOVERED)
+    total_escalated    = await _count_status(PaymentStatus.ESCALATED_STOPPED)
+
+    # Combined "in recovery" for backward-compatible dashboard display
+    total_in_recovery = total_diagnosed + total_intervention
+
+    # ── 2. Amount sums ────────────────────────────────────────────────────────
     async def _sum_amount(status: PaymentStatus) -> float:
         r = await db.execute(
             select(func.coalesce(func.sum(PaymentEvent.amount), 0.0)).where(
@@ -58,20 +74,33 @@ async def calculate_recovery_metrics(db: AsyncSession) -> Dict[str, Any]:
         )
         return float(r.scalar() or 0.0)
 
-    total_at_risk     = await _count_status(PaymentStatus.AT_RISK)
-    total_in_recovery = await _count_status(PaymentStatus.IN_RECOVERY)
-    total_recovered   = await _count_status(PaymentStatus.RECOVERED)
-    total_failed      = await _count_status(PaymentStatus.FAILED_EXHAUSTED)
-    total_stopped     = await _count_status(PaymentStatus.STOPPED_COMPLIANCE)
+    async def _sum_recovered_amount() -> float:
+        """Sum of amount_recovered for RECOVERED events (actual captured revenue)."""
+        r = await db.execute(
+            select(func.coalesce(func.sum(PaymentEvent.amount_recovered), 0.0)).where(
+                PaymentEvent.status == PaymentStatus.RECOVERED
+            )
+        )
+        return float(r.scalar() or 0.0)
 
-    total_amount_at_risk = await _sum_amount(PaymentStatus.AT_RISK)
-    recovered_amount     = await _sum_amount(PaymentStatus.RECOVERED)
+    # Total amount at risk = sum of all in-flight event amounts
+    at_risk_amount       = await _sum_amount(PaymentStatus.AT_RISK)
+    diagnosed_amount     = await _sum_amount(PaymentStatus.DIAGNOSED)
+    intervention_amount  = await _sum_amount(PaymentStatus.INTERVENTION_ACTIVE)
+    total_amount_at_risk = at_risk_amount + diagnosed_amount + intervention_amount
 
-    # ── 2. Recovery rate ─────────────────────────────────────────────────────
-    denominator = total_recovered + total_failed
-    recovery_rate_pct = (total_recovered / denominator * 100.0) if denominator > 0 else 0.0
+    # Actual recovered revenue (from amount_recovered field, not raw amount)
+    recovered_amount = await _sum_recovered_amount()
 
-    # ── 3. Cause breakdown (RecoveryWorkflow.diagnosed_cause) ────────────────
+    # ── 3. Recovery rate ──────────────────────────────────────────────────────
+    # Recovery rate = Recovered / (All in-flight + Recovered) * 100
+    # "All in-flight" counts as denominator so rate reflects true pipeline health
+    denominator = (total_at_risk + total_in_recovery + total_recovered)
+    recovery_rate_pct = (
+        (total_recovered / denominator * 100.0) if denominator > 0 else 0.0
+    )
+
+    # ── 4. Cause breakdown (RecoveryWorkflow.diagnosed_cause) ─────────────────
     cause_result = await db.execute(
         select(
             RecoveryWorkflow.diagnosed_cause,
@@ -84,7 +113,7 @@ async def calculate_recovery_metrics(db: AsyncSession) -> Dict[str, Any]:
         if row.diagnosed_cause is not None
     }
 
-    # ── 4. Strategy breakdown (RecoveryWorkflow.strategy) ────────────────────
+    # ── 5. Strategy breakdown (RecoveryWorkflow.strategy) ─────────────────────
     strategy_result = await db.execute(
         select(
             RecoveryWorkflow.strategy,
@@ -97,7 +126,7 @@ async def calculate_recovery_metrics(db: AsyncSession) -> Dict[str, Any]:
         if row.strategy is not None
     }
 
-    # ── 5. Action-type breakdown (RecoveryAuditLog.action_type) ──────────────
+    # ── 6. Action-type breakdown (RecoveryAuditLog.action_type) ───────────────
     action_result = await db.execute(
         select(
             RecoveryAuditLog.action_type,
@@ -111,28 +140,33 @@ async def calculate_recovery_metrics(db: AsyncSession) -> Dict[str, Any]:
     ]
 
     logger.info(
-        "Metrics: at_risk=%d | in_recovery=%d | recovered=%d | failed=%d | "
-        "rate=%.1f%% | amount_at_risk=%.2f INR",
+        "Metrics: at_risk=%d | diagnosed=%d | intervention=%d | recovered=%d | "
+        "escalated=%d | rate=%.1f%% | amount_at_risk=%.2f | recovered_amount=%.2f INR",
         total_at_risk,
-        total_in_recovery,
+        total_diagnosed,
+        total_intervention,
         total_recovered,
-        total_failed,
+        total_escalated,
         recovery_rate_pct,
         total_amount_at_risk,
+        recovered_amount,
     )
 
     return {
-        # RecoverySummaryStats fields
+        # Phase 7 state counts
         "total_at_risk":        total_at_risk,
-        "total_in_recovery":    total_in_recovery,
+        "total_diagnosed":      total_diagnosed,
+        "total_intervention":   total_intervention,
         "total_recovered":      total_recovered,
-        "total_failed":         total_failed,
-        "total_stopped":        total_stopped,
+        "total_escalated":      total_escalated,
+        # Aggregate for dashboard display (backward-compatible "in recovery" label)
+        "total_in_recovery":    total_in_recovery,
+        # Revenue metrics
         "recovery_rate_pct":    round(recovery_rate_pct, 2),
         "total_amount_at_risk": round(total_amount_at_risk, 2),
         "recovered_amount":     round(recovered_amount, 2),
+        # Breakdowns
         "action_breakdowns":    action_breakdowns,
-        # Extended fields (filtered by Pydantic on the API response layer)
         "cause_breakdown":      cause_breakdown,
         "strategy_breakdown":   strategy_breakdown,
     }

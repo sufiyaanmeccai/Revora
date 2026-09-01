@@ -12,6 +12,10 @@ All models share a common declarative Base and include:
   • id          — UUID string primary key (generated at Python level).
   • created_at  — server-side timestamp set on INSERT.
   • updated_at  — server-side timestamp updated on each UPDATE.
+
+Phase 7 changes:
+  • PaymentStatus enum updated to strict bounded state machine states.
+  • PaymentEvent gains amount_recovered and is_idempotent_lock columns.
 """
 
 import enum
@@ -37,12 +41,18 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 # --------------------------------------------------------------------------- #
 
 class PaymentStatus(str, enum.Enum):
-    """Lifecycle states of a failed payment inside the Revora engine."""
-    AT_RISK             = "AT_RISK"
-    IN_RECOVERY         = "IN_RECOVERY"
-    RECOVERED           = "RECOVERED"
-    FAILED_EXHAUSTED    = "FAILED_EXHAUSTED"
-    STOPPED_COMPLIANCE  = "STOPPED_COMPLIANCE"
+    """
+    Strict bounded lifecycle states of a failed payment inside the Revora engine.
+
+    State machine transitions:
+      AT_RISK → DIAGNOSED → INTERVENTION_ACTIVE → RECOVERED
+                                               ↘ ESCALATED_STOPPED
+    """
+    AT_RISK             = "AT_RISK"             # Ingested, pending decision engine
+    DIAGNOSED           = "DIAGNOSED"           # Root cause classified, agent decision pending
+    INTERVENTION_ACTIVE = "INTERVENTION_ACTIVE" # Outreach dispatched, awaiting customer action
+    RECOVERED           = "RECOVERED"           # Payment successfully captured (terminal)
+    ESCALATED_STOPPED   = "ESCALATED_STOPPED"   # Max retries exhausted, escalated (terminal)
 
 
 class DiagnosedCause(str, enum.Enum):
@@ -100,6 +110,10 @@ class PaymentEvent(Base):
 
     Stores all customer-facing data, the error context returned by Razorpay,
     and the current recovery lifecycle status.
+
+    Phase 7 additions:
+      • amount_recovered      — amount actually captured after recovery (set on RECOVERED).
+      • is_idempotent_lock    — mutex flag to prevent concurrent processing race conditions.
     """
     __tablename__ = "payment_events"
 
@@ -138,6 +152,20 @@ class PaymentEvent(Base):
         index=True,
     )
 
+    # --- Phase 7: Recovery outcome tracking ---
+    amount_recovered: Mapped[float] = mapped_column(
+        Float,
+        nullable=False,
+        default=0.0,
+    )
+
+    # --- Phase 7: Idempotency lock to prevent race conditions ---
+    is_idempotent_lock: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+
     # --- Raw webhook payload ---
     raw_payload: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -154,7 +182,8 @@ class PaymentEvent(Base):
             f"<PaymentEvent id={self.id!r} "
             f"customer={self.customer_email!r} "
             f"amount={self.amount} {self.currency} "
-            f"status={self.status!r}>"
+            f"status={self.status!r} "
+            f"recovered={self.amount_recovered}>"
         )
 
 
@@ -216,6 +245,7 @@ class RecoveryWorkflow(Base):
             f"<RecoveryWorkflow id={self.id!r} "
             f"strategy={self.strategy!r} "
             f"step={self.current_step}/{self.max_steps} "
+            f"retries={self.retry_count} "
             f"active={self.is_active}>"
         )
 
@@ -228,9 +258,9 @@ class RecoveryAuditLog(Base):
     """
     Immutable audit record for every action taken by the recovery engine.
 
-    Captures the reasoning (from the LLM or rule engine), the communication
-    channel used, and arbitrary metadata (e.g., Razorpay payment link IDs,
-    WhatsApp delivery receipts, voice call durations).
+    Phase 7: Each pipeline run emits a single comprehensive audit log that
+    captures the Agent's raw reasoning AND the Guardrail's validation outcome
+    in a unified metadata_json payload.
     """
     __tablename__ = "recovery_audit_logs"
 

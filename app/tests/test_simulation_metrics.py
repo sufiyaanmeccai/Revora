@@ -9,14 +9,20 @@ Test matrix:
     2. Exactly 10 PaymentEvent rows are inserted into the database.
     3. All inserted events have status=AT_RISK.
     4. Count parameter is respected (count=5 → 5 events).
+    5. process_payment_event queued once per event.
+
+  Fast-Forward endpoint (Phase 7):
+    6. POST /api/v1/simulation/fast-forward returns 200 with outcome counts.
+    7. INTERVENTION_ACTIVE events are resolved by the simulator.
 
   Metrics endpoint (with pre-seeded data):
-    5. GET /api/v1/metrics returns 200 with valid RecoverySummaryStats schema.
-    6. total_at_risk reflects the correct count of AT_RISK events.
-    7. total_in_recovery reflects IN_RECOVERY events.
-    8. total_amount_at_risk sums the correct AT_RISK amounts.
-    9. recovery_rate_pct is 0 when no events are RECOVERED yet.
-   10. action_breakdowns is a list (may be empty when no workflows exist).
+    8.  GET /api/v1/metrics returns 200 with valid RecoverySummaryStats schema.
+    9.  total_at_risk reflects the correct count of AT_RISK events.
+    10. total_in_recovery = DIAGNOSED + INTERVENTION_ACTIVE events.
+    11. total_amount_at_risk sums AT_RISK + DIAGNOSED + INTERVENTION_ACTIVE amounts.
+    12. recovery_rate_pct is 0 when no events are RECOVERED yet.
+    13. action_breakdowns is a list (may be empty when no workflows exist).
+    14. recovered_amount uses amount_recovered field (Phase 7).
 
 Strategy:
   • Override get_db with isolated in-memory SQLite for every test.
@@ -96,8 +102,9 @@ def override_db(db_resources):
     app.dependency_overrides.pop(get_db, None)
 
 
-SIMULATION_URL = "/api/v1/simulation/run"
-METRICS_URL    = "/api/v1/metrics"
+SIMULATION_URL    = "/api/v1/simulation/run"
+FAST_FORWARD_URL  = "/api/v1/simulation/fast-forward"
+METRICS_URL       = "/api/v1/metrics"
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +114,7 @@ METRICS_URL    = "/api/v1/metrics"
 def _seed_event(
     status: PaymentStatus = PaymentStatus.AT_RISK,
     amount: float = 999.0,
+    amount_recovered: float = 0.0,
 ) -> PaymentEvent:
     return PaymentEvent(
         id=str(uuid.uuid4()),
@@ -119,6 +127,7 @@ def _seed_event(
         error_code="BAD_REQUEST_ERROR",
         error_reason="insufficient_funds",
         status=status,
+        amount_recovered=amount_recovered,
     )
 
 
@@ -222,13 +231,49 @@ async def test_simulation_queues_background_task_per_event(
 
 
 # ---------------------------------------------------------------------------
+# Fast-Forward endpoint tests (Phase 7)
+# ---------------------------------------------------------------------------
+
+async def test_fast_forward_returns_200(
+    override_db: AsyncSession,
+) -> None:
+    """POST /simulation/fast-forward must return 200 with outcome counts."""
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(FAST_FORWARD_URL)
+
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert "resolved" in data
+    assert "total_processed" in data
+    assert "recovered" in data
+    assert "escalated" in data
+    assert "still_active" in data
+
+
+async def test_fast_forward_with_no_active_events(
+    override_db: AsyncSession,
+) -> None:
+    """When no INTERVENTION_ACTIVE events exist, resolved must be 0."""
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(FAST_FORWARD_URL)
+
+    data = response.json()
+    assert data["total_processed"] == 0
+    assert data["resolved"] == 0
+
+
+# ---------------------------------------------------------------------------
 # Metrics endpoint tests
 # ---------------------------------------------------------------------------
 
 async def test_metrics_returns_200_and_valid_schema(
     override_db: AsyncSession,
 ) -> None:
-    """GET /metrics must return 200 with all RecoverySummaryStats fields."""
+    """GET /metrics must return 200 with all Phase 7 RecoverySummaryStats fields."""
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test"
     ) as client:
@@ -237,13 +282,16 @@ async def test_metrics_returns_200_and_valid_schema(
     assert response.status_code == 200, response.text
     data = response.json()
 
+    # Phase 7 required fields
     required_fields = {
-        "total_at_risk", "total_in_recovery", "total_recovered",
-        "total_failed", "total_stopped",
+        "total_at_risk", "total_diagnosed", "total_intervention",
+        "total_recovered", "total_escalated", "total_in_recovery",
         "recovery_rate_pct", "total_amount_at_risk", "recovered_amount",
         "action_breakdowns",
     }
-    assert required_fields.issubset(data.keys())
+    assert required_fields.issubset(data.keys()), (
+        f"Missing fields: {required_fields - data.keys()}"
+    )
 
 
 async def test_metrics_total_at_risk_count(
@@ -251,9 +299,9 @@ async def test_metrics_total_at_risk_count(
 ) -> None:
     """total_at_risk must reflect the number of AT_RISK events in the DB."""
     override_db.add_all([
-        _seed_event(PaymentStatus.AT_RISK,     500.0),
-        _seed_event(PaymentStatus.AT_RISK,     750.0),
-        _seed_event(PaymentStatus.IN_RECOVERY, 300.0),
+        _seed_event(PaymentStatus.AT_RISK,              500.0),
+        _seed_event(PaymentStatus.AT_RISK,              750.0),
+        _seed_event(PaymentStatus.INTERVENTION_ACTIVE,  300.0),
     ])
     await override_db.commit()
 
@@ -264,17 +312,17 @@ async def test_metrics_total_at_risk_count(
 
     data = response.json()
     assert data["total_at_risk"]     == 2
-    assert data["total_in_recovery"] == 1
+    assert data["total_in_recovery"] == 1   # INTERVENTION_ACTIVE
 
 
-async def test_metrics_total_amount_at_risk(
+async def test_metrics_total_in_recovery_aggregates_diagnosed_and_active(
     override_db: AsyncSession,
 ) -> None:
-    """total_amount_at_risk must sum the amounts of AT_RISK events only."""
+    """total_in_recovery must sum DIAGNOSED + INTERVENTION_ACTIVE events."""
     override_db.add_all([
-        _seed_event(PaymentStatus.AT_RISK, 1000.0),
-        _seed_event(PaymentStatus.AT_RISK, 500.0),
-        _seed_event(PaymentStatus.RECOVERED, 800.0),  # must NOT be included
+        _seed_event(PaymentStatus.DIAGNOSED,            500.0),
+        _seed_event(PaymentStatus.INTERVENTION_ACTIVE,  300.0),
+        _seed_event(PaymentStatus.AT_RISK,              200.0),
     ])
     await override_db.commit()
 
@@ -284,17 +332,57 @@ async def test_metrics_total_amount_at_risk(
         response = await client.get(METRICS_URL)
 
     data = response.json()
-    assert data["total_amount_at_risk"] == pytest.approx(1500.0, abs=0.01)
-    assert data["recovered_amount"]     == pytest.approx(800.0,  abs=0.01)
+    assert data["total_in_recovery"] == 2   # 1 DIAGNOSED + 1 INTERVENTION_ACTIVE
+
+
+async def test_metrics_total_amount_at_risk_includes_all_inflight(
+    override_db: AsyncSession,
+) -> None:
+    """total_amount_at_risk must sum AT_RISK + DIAGNOSED + INTERVENTION_ACTIVE amounts."""
+    override_db.add_all([
+        _seed_event(PaymentStatus.AT_RISK,              1000.0),
+        _seed_event(PaymentStatus.DIAGNOSED,            500.0),
+        _seed_event(PaymentStatus.INTERVENTION_ACTIVE,  250.0),
+        _seed_event(PaymentStatus.RECOVERED,            800.0, amount_recovered=800.0),
+    ])
+    await override_db.commit()
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.get(METRICS_URL)
+
+    data = response.json()
+    # 1000 + 500 + 250 = 1750 (RECOVERED excluded from at-risk)
+    assert data["total_amount_at_risk"] == pytest.approx(1750.0, abs=0.01)
+
+
+async def test_metrics_recovered_amount_uses_amount_recovered_field(
+    override_db: AsyncSession,
+) -> None:
+    """recovered_amount must use amount_recovered field, not raw amount."""
+    override_db.add_all([
+        _seed_event(PaymentStatus.RECOVERED, amount=1000.0, amount_recovered=1000.0),
+        _seed_event(PaymentStatus.RECOVERED, amount=500.0,  amount_recovered=500.0),
+    ])
+    await override_db.commit()
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.get(METRICS_URL)
+
+    data = response.json()
+    assert data["recovered_amount"] == pytest.approx(1500.0, abs=0.01)
 
 
 async def test_metrics_recovery_rate_zero_when_no_recovered(
     override_db: AsyncSession,
 ) -> None:
-    """recovery_rate_pct must be 0.0 when no events are RECOVERED or FAILED."""
+    """recovery_rate_pct must be 0.0 when no events are RECOVERED."""
     override_db.add_all([
         _seed_event(PaymentStatus.AT_RISK),
-        _seed_event(PaymentStatus.IN_RECOVERY),
+        _seed_event(PaymentStatus.INTERVENTION_ACTIVE),
     ])
     await override_db.commit()
 
@@ -309,12 +397,16 @@ async def test_metrics_recovery_rate_zero_when_no_recovered(
 async def test_metrics_recovery_rate_calculation(
     override_db: AsyncSession,
 ) -> None:
-    """recovery_rate_pct = recovered / (recovered + failed) * 100."""
+    """
+    Phase 7 recovery_rate_pct = Recovered / (At Risk + Recovered) * 100.
+    3 recovered + 2 at-risk → 3/5 * 100 = 60.0%.
+    """
     override_db.add_all([
-        _seed_event(PaymentStatus.RECOVERED,       400.0),
-        _seed_event(PaymentStatus.RECOVERED,       400.0),
-        _seed_event(PaymentStatus.RECOVERED,       400.0),
-        _seed_event(PaymentStatus.FAILED_EXHAUSTED, 200.0),
+        _seed_event(PaymentStatus.RECOVERED,    400.0, amount_recovered=400.0),
+        _seed_event(PaymentStatus.RECOVERED,    400.0, amount_recovered=400.0),
+        _seed_event(PaymentStatus.RECOVERED,    400.0, amount_recovered=400.0),
+        _seed_event(PaymentStatus.AT_RISK,      200.0),
+        _seed_event(PaymentStatus.AT_RISK,      200.0),
     ])
     await override_db.commit()
 
@@ -324,8 +416,8 @@ async def test_metrics_recovery_rate_calculation(
         response = await client.get(METRICS_URL)
 
     data = response.json()
-    # 3 recovered, 1 failed → 3/4 * 100 = 75.0
-    assert data["recovery_rate_pct"] == pytest.approx(75.0, abs=0.1)
+    # 3 recovered / (2 at-risk + 3 recovered) = 3/5 = 60%
+    assert data["recovery_rate_pct"] == pytest.approx(60.0, abs=0.1)
 
 
 async def test_metrics_action_breakdowns_is_list(

@@ -8,7 +8,15 @@ Organised in layers:
   ② Payment domain         — PaymentEventCreate, PaymentEventRead
   ③ Recovery workflow      — RecoveryWorkflowCreate, RecoveryWorkflowRead
   ④ Audit log              — AuditLogCreate, AuditLogRead
-  ⑤ Analytics              — RecoverySummaryStats
+  ⑤ Agent decision         — AgentDecision (Phase 7)
+  ⑥ Analytics              — RecoverySummaryStats
+
+Phase 7 changes:
+  • PaymentStatus now has 5 bounded states (AT_RISK, DIAGNOSED,
+    INTERVENTION_ACTIVE, RECOVERED, ESCALATED_STOPPED).
+  • PaymentEventRead gains amount_recovered and is_idempotent_lock.
+  • AgentDecision Pydantic model added for LLM structured output.
+  • RecoverySummaryStats updated to reflect new state groupings.
 """
 
 from __future__ import annotations
@@ -42,6 +50,44 @@ class ErrorDetail(BaseModel):
     code: str
     message: str
     details: Optional[Any] = None
+
+
+# --------------------------------------------------------------------------- #
+# Phase 7: AI Agent Decision schema                                            #
+# --------------------------------------------------------------------------- #
+
+class AgentDecision(BaseModel):
+    """
+    Structured output produced by the Recovery Agent (Phase 7).
+
+    Mirrors what an LLM structured-output framework (Instructor / LangChain)
+    would yield when analysing a failed PaymentEvent. The GuardrailEngine
+    validates and may override this decision before it is executed.
+
+    Fields:
+        recommended_strategy: The strategy the agent recommends.
+        confidence_score:     Agent confidence in the recommendation (0.0–1.0).
+        reasoning:            Human-readable explanation of the agent's logic.
+        requires_consent:     True if the strategy requires explicit customer
+                              consent before execution (e.g., plan downgrades,
+                              mandate migrations).
+    """
+
+    recommended_strategy: RecoveryStrategy
+    confidence_score: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Agent confidence in the recommended strategy (0.0 = no confidence, 1.0 = certain).",
+    )
+    reasoning: str = Field(
+        description="LLM reasoning chain explaining why this strategy was selected."
+    )
+    requires_consent: bool = Field(
+        default=False,
+        description="True if the strategy requires explicit customer consent before execution.",
+    )
+
+    model_config = ConfigDict(str_strip_whitespace=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -103,6 +149,9 @@ class PaymentEventRead(BaseModel):
     error_source:             Optional[str] = None
     error_reason:             Optional[str] = None
     status:                   PaymentStatus
+    # Phase 7: outcome tracking
+    amount_recovered:         float = 0.0
+    is_idempotent_lock:       bool = False
     raw_payload:              Optional[str] = None
     created_at:               datetime
     updated_at:               datetime
@@ -155,9 +204,9 @@ class AuditLogCreate(BaseModel):
     payment_event_id: str
     action_type:      str = Field(
         description=(
-            "One of: SILENT_RETRY_SCHEDULED, PAYMENT_LINK_GENERATED, "
-            "WHATSAPP_NUDGE_SENT, VOICE_CALL_TRIGGERED, "
-            "PAYMENT_CONFIRMED, STOP_LIMIT_REACHED"
+            "One of: INTERVENTION_DISPATCHED, PAYMENT_CONFIRMED, "
+            "OUTCOME_SIMULATED_SUCCESS, OUTCOME_SIMULATED_FAILURE, "
+            "ESCALATED_STOPPED"
         )
     )
     reasoning:     Optional[str] = None
@@ -205,32 +254,41 @@ class RecoverySummaryStats(BaseModel):
     """
     Aggregated metrics for the Revora recovery dashboard.
 
-    Returned by the analytics endpoint to summarise engine performance
-    over a given time window.
+    Phase 7 state groupings:
+      • "At Risk" = AT_RISK + DIAGNOSED + INTERVENTION_ACTIVE
+        (all events not yet in a terminal state).
+      • "Recovered" = RECOVERED (terminal success, uses amount_recovered).
+      • "Escalated" = ESCALATED_STOPPED (terminal failure).
+
+    Returned by the analytics endpoint to summarise engine performance.
     """
 
-    total_at_risk:        int   = Field(description="Events currently in AT_RISK state")
-    total_in_recovery:    int   = Field(description="Events actively being recovered")
-    total_recovered:      int   = Field(description="Events successfully recovered")
-    total_failed:         int   = Field(description="Events exhausted without recovery")
-    total_stopped:        int   = Field(description="Events stopped for compliance")
+    # --- Phase 7 state counts ---
+    total_at_risk:          int   = Field(description="Events in AT_RISK state")
+    total_diagnosed:        int   = Field(description="Events in DIAGNOSED state")
+    total_intervention:     int   = Field(description="Events in INTERVENTION_ACTIVE state")
+    total_recovered:        int   = Field(description="Events successfully recovered (terminal)")
+    total_escalated:        int   = Field(description="Events escalated/stopped (terminal)")
 
-    recovery_rate_pct:    float = Field(description="Recovered / (Recovered + Failed) × 100")
-    total_amount_at_risk: float = Field(description="Sum of amounts for AT_RISK events (INR)")
-    recovered_amount:     float = Field(description="Sum of amounts for RECOVERED events (INR)")
+    # --- Aggregate "in-flight" count for dashboard display ---
+    total_in_recovery:      int   = Field(description="DIAGNOSED + INTERVENTION_ACTIVE combined")
 
-    action_breakdowns:    List[ActionBreakdown] = Field(
+    # --- Revenue metrics ---
+    recovery_rate_pct:      float = Field(description="Recovered / (At Risk + Recovered) × 100")
+    total_amount_at_risk:   float = Field(description="Sum of amounts for AT_RISK+DIAGNOSED+INTERVENTION_ACTIVE (INR)")
+    recovered_amount:       float = Field(description="Sum of amount_recovered for RECOVERED events (INR)")
+
+    action_breakdowns:      List[ActionBreakdown] = Field(
         default_factory=list,
         description="Per-action-type audit log counts",
     )
-    cause_breakdown:       Dict[str, int] = Field(
+    cause_breakdown:        Dict[str, int] = Field(
         default_factory=dict,
         description="Breakdown of workflows grouped by diagnosed cause",
     )
-    strategy_breakdown:    Dict[str, int] = Field(
+    strategy_breakdown:     Dict[str, int] = Field(
         default_factory=dict,
         description="Breakdown of workflows grouped by recovery strategy",
     )
 
     model_config = ConfigDict(from_attributes=True)
-

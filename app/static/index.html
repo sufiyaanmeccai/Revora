@@ -151,6 +151,17 @@
           </svg>
           <span id="simBtnText">Run Batch Simulation (50 Events)</span>
         </button>
+
+        <button id="ffBtn" onclick="fastForwardOutcomes()" class="px-5 py-2.5 bg-gradient-to-r from-emerald-500 to-brand-success hover:from-emerald-600 hover:to-emerald-500 text-white rounded-xl text-sm font-semibold shadow-lg transition transform active:scale-95 flex items-center space-x-2" style="box-shadow: 0 0 25px -5px rgba(0, 208, 156, 0.35);">
+          <svg id="ffSpinner" class="hidden animate-spin w-4 h-4 text-white" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+          </svg>
+          <svg id="ffIcon" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 5l7 7-7 7M5 5l7 7-7 7" />
+          </svg>
+          <span id="ffBtnText">Fast-Forward Outcomes</span>
+        </button>
       </div>
     </div>
 
@@ -197,7 +208,7 @@
             <div class="text-2xl lg:text-3xl font-extrabold text-white tracking-tight" id="metricEventsAtRisk">0</div>
             <div class="flex items-center space-x-1.5 mt-1 text-xs text-brand-textMuted">
               <span class="text-brand-warning font-semibold">AT_RISK</span>
-              <span>queued for diagnosis</span>
+              <span>awaiting diagnosis</span>
             </div>
           </div>
         </div>
@@ -215,8 +226,8 @@
           <div class="mt-4">
             <div class="text-2xl lg:text-3xl font-extrabold text-brand-accent tracking-tight" id="metricInRecovery">0</div>
             <div class="flex items-center space-x-1.5 mt-1 text-xs text-brand-textMuted">
-              <span class="text-brand-accent font-semibold">Active</span>
-              <span>workflows running</span>
+              <span class="text-brand-accent font-semibold">INTERVENTION_ACTIVE</span>
+              <span id="metricDiagnosedLabel">+0 DIAGNOSED</span>
             </div>
           </div>
         </div>
@@ -377,7 +388,11 @@
         // Update top-level metric numbers
         document.getElementById('metricAmountAtRisk').textContent = formatINR(data.total_amount_at_risk);
         document.getElementById('metricEventsAtRisk').textContent = (data.total_at_risk || 0).toLocaleString();
+        // Phase 7: total_in_recovery = DIAGNOSED + INTERVENTION_ACTIVE
         document.getElementById('metricInRecovery').textContent = (data.total_in_recovery || 0).toLocaleString();
+        const diagnosed = data.total_diagnosed || 0;
+        const diagLabel = document.getElementById('metricDiagnosedLabel');
+        if (diagLabel) diagLabel.textContent = `+${diagnosed} DIAGNOSED`;
         document.getElementById('metricRecoveredAmount').textContent = formatINR(data.recovered_amount);
         document.getElementById('metricRecoveryRate').textContent = `${(data.recovery_rate_pct || 0).toFixed(1)}% Rate`;
         document.getElementById('metricTotalRecovered').textContent = (data.total_recovered || 0).toLocaleString();
@@ -539,6 +554,55 @@
         simSpinner.classList.add('hidden');
         simIcon.classList.remove('hidden');
         simBtnText.textContent = `Run Batch Simulation (${count} Events)`;
+      }
+    }
+
+    // Fast-Forward Outcomes Button Handler (Phase 7)
+    async function fastForwardOutcomes() {
+      const ffBtn = document.getElementById('ffBtn');
+      const ffSpinner = document.getElementById('ffSpinner');
+      const ffIcon = document.getElementById('ffIcon');
+      const ffBtnText = document.getElementById('ffBtnText');
+
+      // Set loading state
+      ffBtn.disabled = true;
+      ffBtn.classList.add('opacity-75', 'cursor-not-allowed');
+      ffSpinner.classList.remove('hidden');
+      ffIcon.classList.add('hidden');
+      ffBtnText.textContent = 'Simulating customer payments...';
+
+      try {
+        const res = await fetch('/api/v1/simulation/fast-forward', {
+          method: 'POST'
+        });
+
+        if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+        const data = await res.json();
+
+        if (data.total_processed === 0) {
+          showToast('ℹ️ No active interventions to resolve. Run a batch simulation first, then fast-forward.', 'success');
+        } else {
+          showToast(
+            `💰 Outcome simulation complete! ${data.recovered} recovered (₹ captured), ` +
+            `${data.escalated} escalated, ${data.still_active} pending retry ` +
+            `(${data.total_processed} total processed).`,
+            'success'
+          );
+        }
+
+        // Refresh metrics immediately and again after commit propagates
+        await fetchMetrics();
+        setTimeout(fetchMetrics, 800);
+
+      } catch (err) {
+        console.error('Error running fast-forward:', err);
+        showToast('Failed to run outcome simulation: ' + err.message, 'error');
+      } finally {
+        ffBtn.disabled = false;
+        ffBtn.classList.remove('opacity-75', 'cursor-not-allowed');
+        ffSpinner.classList.add('hidden');
+        ffIcon.classList.remove('hidden');
+        ffBtnText.textContent = 'Fast-Forward Outcomes';
       }
     }
 

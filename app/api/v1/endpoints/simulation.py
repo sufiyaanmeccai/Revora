@@ -1,13 +1,15 @@
 """
 app/api/v1/endpoints/simulation.py
 ------------------------------------
-Batch simulation endpoint for the Revora Revenue Recovery Engine.
+Batch simulation endpoints for the Revora Revenue Recovery Engine.
 
-Allows on-demand generation of synthetic failed payment events and kicks off
-the decision engine pipeline for each one as a background task.
+Endpoints:
+  POST /api/v1/simulation/run?count=N
+      Generates N synthetic PaymentEvent records and queues them for recovery.
 
-POST /api/v1/simulation/run?count=N
-    Generates N synthetic PaymentEvent records and queues them for recovery.
+  POST /api/v1/simulation/fast-forward   [Phase 7]
+      Probabilistically finalises all INTERVENTION_ACTIVE events using the
+      Outcome Simulator (65% RECOVERED, 35% escalate/retry).
 """
 
 import logging
@@ -18,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.services.decision_engine import process_payment_event
+from app.services.outcome_simulator import simulate_active_interventions
 from app.services.simulation import generate_synthetic_batch
 
 logger = logging.getLogger(__name__)
@@ -72,5 +75,55 @@ async def run_simulation(
             "status":    "batch_started",
             "count":     count,
             "event_ids": event_ids,
+        },
+    )
+
+
+@router.post(
+    "/fast-forward",
+    summary="Fast-forward outcome simulation",
+    description=(
+        "Probabilistically resolves all INTERVENTION_ACTIVE payment events. "
+        "65% are transitioned to RECOVERED (with amount_recovered set). "
+        "35% are retried or escalated based on retry_count vs MAX_RETRIES. "
+        "Returns the count of resolved (RECOVERED + ESCALATED_STOPPED) workflows."
+    ),
+)
+async def fast_forward_outcomes(
+    db: AsyncSession = Depends(get_db),
+) -> JSONResponse:
+    """
+    Outcome Simulator endpoint (Phase 7).
+
+    Simulates the real-world customer response to recovery outreach by
+    probabilistically finalising all INTERVENTION_ACTIVE events.
+
+    Returns:
+        JSON with total_processed, recovered, escalated, still_active counts.
+    """
+    logger.info("Fast-forward outcome simulation requested.")
+
+    result = await simulate_active_interventions(db)
+
+    resolved = result["recovered"] + result["escalated"]
+
+    logger.info(
+        "Fast-forward complete: processed=%d resolved=%d (recovered=%d, escalated=%d) still_active=%d",
+        result["total_processed"],
+        resolved,
+        result["recovered"],
+        result["escalated"],
+        result["still_active"],
+    )
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "status":          "outcomes_simulated",
+            "resolved":        resolved,
+            "total_processed": result["total_processed"],
+            "recovered":       result["recovered"],
+            "escalated":       result["escalated"],
+            "still_active":    result["still_active"],
         },
     )

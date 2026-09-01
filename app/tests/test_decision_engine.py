@@ -1,24 +1,29 @@
 """
 app/tests/test_decision_engine.py
 ----------------------------------
-Async pytest tests for the Revora Decision Engine.
+Async pytest tests for the Phase 7 Revora Decision Engine.
 
 Coverage:
-  1. Gateway error  → TEMPORARY_NETWORK_FAILURE + SILENT_MANDATE_RETRY.
-  2. Insufficient funds (high-ticket) → INSUFFICIENT_FUNDS_ADAPTIVE + ADAPTIVE_DOWNGRADE_OFFER.
-  3. Insufficient funds (low-ticket)  → INSUFFICIENT_FUNDS_ADAPTIVE + SILENT_MANDATE_RETRY.
-  4. Card declined  → EXPIRED_PAYMENT_METHOD + SECURE_PAYMENT_LINK.
-  5. Unknown error  → MANDATE_DECLINED + SECURE_PAYMENT_LINK (default fallback).
-  6. PaymentEvent.status is updated to IN_RECOVERY after processing.
-  7. Audit log is created with WORKFLOW_INITIATED action type.
+  1. _diagnose() pure-function unit tests (preserved from prior phases).
+  2. State machine: AT_RISK → DIAGNOSED → INTERVENTION_ACTIVE on processing.
+  3. Idempotency: RECOVERED (terminal) → engine no-op.
+  4. Idempotency: ESCALATED_STOPPED (terminal) → engine no-op.
+  5. Idempotency: INTERVENTION_ACTIVE already set → engine no-op.
+  6. Comprehensive audit log is created (single log per run, action=INTERVENTION_DISPATCHED).
+  7. Guardrail integration: low-ticket insufficient_funds → downgrade blocked.
+  8. Workflow created with correct strategy and cause fields.
+  9. Gateway error → SILENT_MANDATE_RETRY workflow.
+ 10. Card declined → SECURE_PAYMENT_LINK + WHATSAPP_NUDGE_SENT in audit metadata.
 
 Strategy:
   • Each test creates an isolated in-memory SQLite DB with its own schema.
   • A PaymentEvent is inserted directly.
   • ``process_payment_event`` is called with the test session factory injected
-    via the ``_session_factory`` parameter — no patching of module globals needed.
-  • Assertions query the DB directly to verify the expected ORM state.
+    via the ``_session_factory`` parameter — no patching of module globals.
+  • Assertions query the DB directly to verify ORM state.
 """
+
+from __future__ import annotations
 
 import json
 import uuid
@@ -44,9 +49,9 @@ from app.models.orm import (
 )
 from app.services.decision_engine import _diagnose, process_payment_event
 
-# ---------------------------------------------------------------------------
-# Test engine factory — each test gets a fresh in-memory DB
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- #
+# Test engine factory — each test gets a fresh in-memory DB                   #
+# --------------------------------------------------------------------------- #
 def _make_test_factory() -> tuple[AsyncEngine, async_sessionmaker[AsyncSession]]:
     """Return (engine, sessionmaker) backed by a fresh in-memory SQLite DB."""
     eng = create_async_engine(
@@ -74,6 +79,7 @@ def _event(
     error_code: str = "UNKNOWN",
     error_reason: str = "",
     amount: float = 999.0,
+    status: PaymentStatus = PaymentStatus.AT_RISK,
 ) -> PaymentEvent:
     return PaymentEvent(
         id=str(uuid.uuid4()),
@@ -85,13 +91,13 @@ def _event(
         currency="INR",
         error_code=error_code,
         error_reason=error_reason,
-        status=PaymentStatus.AT_RISK,
+        status=status,
     )
 
 
-# ---------------------------------------------------------------------------
-# Unit tests on _diagnose() — pure function, no DB needed
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- #
+# Unit tests on _diagnose() — pure function, no DB needed                     #
+# --------------------------------------------------------------------------- #
 
 def test_diagnose_gateway_error() -> None:
     result = _diagnose("GATEWAY_ERROR", "timeout", 499.0)
@@ -124,9 +130,151 @@ def test_diagnose_default_fallback() -> None:
     assert result.strategy == RecoveryStrategy.SECURE_PAYMENT_LINK
 
 
-# ---------------------------------------------------------------------------
-# Integration tests — decision engine + DB
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- #
+# Phase 7 state machine tests                                                  #
+# --------------------------------------------------------------------------- #
+
+async def test_state_machine_at_risk_to_intervention_active() -> None:
+    """
+    Core pipeline: AT_RISK → DIAGNOSED → INTERVENTION_ACTIVE.
+    The event's final status must be INTERVENTION_ACTIVE.
+    """
+    eng, factory = _make_test_factory()
+    await _bootstrap(eng)
+
+    ev = _event(error_code="GATEWAY_ERROR", error_reason="timeout", amount=999.0)
+    async with factory() as session:
+        session.add(ev)
+        await session.commit()
+
+    assert ev.status == PaymentStatus.AT_RISK  # precondition
+
+    await process_payment_event(ev.id, _session_factory=factory)
+
+    async with factory() as session:
+        fetched = await session.get(PaymentEvent, ev.id)
+
+    assert fetched is not None
+    assert fetched.status == PaymentStatus.INTERVENTION_ACTIVE, (
+        f"Expected INTERVENTION_ACTIVE, got {fetched.status}"
+    )
+
+
+async def test_idempotency_recovered_is_terminal() -> None:
+    """
+    Idempotency: RECOVERED is a terminal state. Engine must be a no-op.
+    No workflow should be created.
+    """
+    eng, factory = _make_test_factory()
+    await _bootstrap(eng)
+
+    ev = _event(error_code="GATEWAY_ERROR", error_reason="timeout")
+    ev.status = PaymentStatus.RECOVERED  # pre-set terminal
+    async with factory() as session:
+        session.add(ev)
+        await session.commit()
+
+    await process_payment_event(ev.id, _session_factory=factory)
+
+    async with factory() as session:
+        wf_result = await session.execute(
+            select(RecoveryWorkflow).where(RecoveryWorkflow.payment_event_id == ev.id)
+        )
+        workflows = wf_result.scalars().all()
+
+    assert workflows == [], "Engine must skip RECOVERED events (terminal state)."
+
+
+async def test_idempotency_escalated_stopped_is_terminal() -> None:
+    """
+    Idempotency: ESCALATED_STOPPED is a terminal state. Engine must be a no-op.
+    """
+    eng, factory = _make_test_factory()
+    await _bootstrap(eng)
+
+    ev = _event(error_code="GATEWAY_ERROR", error_reason="timeout")
+    ev.status = PaymentStatus.ESCALATED_STOPPED  # pre-set terminal
+    async with factory() as session:
+        session.add(ev)
+        await session.commit()
+
+    await process_payment_event(ev.id, _session_factory=factory)
+
+    async with factory() as session:
+        wf_result = await session.execute(
+            select(RecoveryWorkflow).where(RecoveryWorkflow.payment_event_id == ev.id)
+        )
+        workflows = wf_result.scalars().all()
+
+    assert workflows == [], "Engine must skip ESCALATED_STOPPED events (terminal state)."
+
+
+async def test_idempotency_intervention_active_skipped() -> None:
+    """
+    Idempotency: INTERVENTION_ACTIVE events must not be reprocessed.
+    """
+    eng, factory = _make_test_factory()
+    await _bootstrap(eng)
+
+    ev = _event(error_code="GATEWAY_ERROR", error_reason="timeout")
+    ev.status = PaymentStatus.INTERVENTION_ACTIVE  # pre-set
+    async with factory() as session:
+        session.add(ev)
+        await session.commit()
+
+    await process_payment_event(ev.id, _session_factory=factory)
+
+    async with factory() as session:
+        wf_result = await session.execute(
+            select(RecoveryWorkflow).where(RecoveryWorkflow.payment_event_id == ev.id)
+        )
+        workflows = wf_result.scalars().all()
+
+    assert workflows == [], "Engine must skip INTERVENTION_ACTIVE events (already processed)."
+
+
+async def test_single_comprehensive_audit_log_created() -> None:
+    """
+    Phase 7: A single INTERVENTION_DISPATCHED audit log must be created
+    per pipeline run (not two separate logs).
+    The log must contain agent reasoning AND guardrail outcome in metadata.
+    """
+    eng, factory = _make_test_factory()
+    await _bootstrap(eng)
+
+    ev = _event(error_code="GATEWAY_ERROR", error_reason="timeout", amount=999.0)
+    async with factory() as session:
+        session.add(ev)
+        await session.commit()
+
+    await process_payment_event(ev.id, _session_factory=factory)
+
+    async with factory() as session:
+        log_result = await session.execute(
+            select(RecoveryAuditLog).where(RecoveryAuditLog.payment_event_id == ev.id)
+        )
+        logs = log_result.scalars().all()
+
+    assert len(logs) == 1, (
+        f"Phase 7 requires exactly 1 comprehensive audit log per run, found {len(logs)}."
+    )
+
+    log = logs[0]
+    assert log.action_type == "INTERVENTION_DISPATCHED"
+
+    # Reasoning must contain both agent and guardrail sections
+    assert "AGENT REASONING" in log.reasoning, "Audit log must contain agent reasoning."
+    assert "GUARDRAIL VALIDATION" in log.reasoning, "Audit log must contain guardrail outcome."
+
+    # Metadata must contain all audit fields
+    assert log.metadata_json is not None
+    meta = json.loads(log.metadata_json)
+    assert "agent_recommended_strategy" in meta
+    assert "guardrail_validated_strategy" in meta
+    assert "guardrail_overridden" in meta
+    assert "outreach_action" in meta
+    assert "outreach_channel" in meta
+
 
 async def test_gateway_error_creates_network_failure_workflow() -> None:
     """Gateway error → TEMPORARY_NETWORK_FAILURE + SILENT_MANDATE_RETRY workflow."""
@@ -144,29 +292,87 @@ async def test_gateway_error_creates_network_failure_workflow() -> None:
         wf_result = await session.execute(
             select(RecoveryWorkflow).where(RecoveryWorkflow.payment_event_id == ev.id)
         )
-        workflows = wf_result.scalars().all()
+        wf = wf_result.scalar_one()
 
-    assert len(workflows) == 1
-    wf = workflows[0]
     assert wf.diagnosed_cause == DiagnosedCause.TEMPORARY_NETWORK_FAILURE
     assert wf.strategy        == RecoveryStrategy.SILENT_MANDATE_RETRY
     assert wf.is_active       is True
     assert wf.current_step    == 1
 
-    # Two audit logs: WORKFLOW_INITIATED + SILENT_RETRY_SCHEDULED
+
+async def test_card_declined_audit_log_metadata() -> None:
+    """Card declined → SECURE_PAYMENT_LINK. Audit log metadata must have outreach_action."""
+    eng, factory = _make_test_factory()
+    await _bootstrap(eng)
+
+    ev = _event(error_code="BAD_REQUEST_ERROR", error_reason="card_declined", amount=499.0)
+    async with factory() as session:
+        session.add(ev)
+        await session.commit()
+
+    await process_payment_event(ev.id, _session_factory=factory)
+
     async with factory() as session:
         log_result = await session.execute(
             select(RecoveryAuditLog).where(RecoveryAuditLog.payment_event_id == ev.id)
         )
-        logs = log_result.scalars().all()
-    assert len(logs) == 2
-    action_types = {log.action_type for log in logs}
-    assert "WORKFLOW_INITIATED"    in action_types
-    assert "SILENT_RETRY_SCHEDULED" in action_types
+        log = log_result.scalar_one()
+
+    meta = json.loads(log.metadata_json)
+    assert meta["outreach_action"] == "WHATSAPP_NUDGE_SENT"
+    assert meta["outreach_channel"] == "WHATSAPP"
+    assert meta["guardrail_validated_strategy"] == "SECURE_PAYMENT_LINK"
+
+
+async def test_guardrail_blocks_downgrade_for_low_ticket_in_pipeline() -> None:
+    """
+    Integration: Low-ticket insufficient_funds agent recommends ADAPTIVE_DOWNGRADE_OFFER,
+    but guardrail must override to SECURE_PAYMENT_LINK.
+    The workflow.strategy must reflect the guardrail-validated decision.
+    """
+    eng, factory = _make_test_factory()
+    await _bootstrap(eng)
+
+    # Amount < ₹500 triggers Rule 1 in guardrail
+    ev = _event(
+        error_code="BAD_REQUEST_ERROR",
+        error_reason="insufficient_funds",
+        amount=299.0,  # Agent recommends downgrade, guardrail will block
+    )
+    async with factory() as session:
+        session.add(ev)
+        await session.commit()
+
+    await process_payment_event(ev.id, _session_factory=factory)
+
+    async with factory() as session:
+        wf_result = await session.execute(
+            select(RecoveryWorkflow).where(RecoveryWorkflow.payment_event_id == ev.id)
+        )
+        wf = wf_result.scalar_one()
+
+    # Guardrail must have overridden ADAPTIVE_DOWNGRADE_OFFER → SECURE_PAYMENT_LINK
+    assert wf.strategy == RecoveryStrategy.SECURE_PAYMENT_LINK, (
+        "Guardrail should override downgrade to SECURE_PAYMENT_LINK for amount < ₹500."
+    )
+
+    # Audit log must document the override
+    async with factory() as session:
+        log_result = await session.execute(
+            select(RecoveryAuditLog).where(RecoveryAuditLog.payment_event_id == ev.id)
+        )
+        log = log_result.scalar_one()
+
+    meta = json.loads(log.metadata_json)
+    # Agent originally recommended downgrade
+    assert meta["agent_recommended_strategy"] == "ADAPTIVE_DOWNGRADE_OFFER"
+    # Guardrail overrode to secure link
+    assert meta["guardrail_validated_strategy"] == "SECURE_PAYMENT_LINK"
+    assert meta["guardrail_overridden"] is True
 
 
 async def test_insufficient_funds_high_ticket_creates_downgrade_workflow() -> None:
-    """High-ticket insufficient funds → ADAPTIVE_DOWNGRADE_OFFER."""
+    """High-ticket insufficient funds → ADAPTIVE_DOWNGRADE_OFFER (guardrail permits it)."""
     eng, factory = _make_test_factory()
     await _bootstrap(eng)
 
@@ -185,114 +391,7 @@ async def test_insufficient_funds_high_ticket_creates_downgrade_workflow() -> No
 
     assert wf.diagnosed_cause == DiagnosedCause.INSUFFICIENT_FUNDS_ADAPTIVE
     assert wf.strategy        == RecoveryStrategy.ADAPTIVE_DOWNGRADE_OFFER
-    assert wf.max_steps       == 4     # high-ticket gets an extra step
-
-    # Two audit logs: WORKFLOW_INITIATED + DOWNGRADE_OFFER_SENT
-    async with factory() as session:
-        log_result = await session.execute(
-            select(RecoveryAuditLog).where(RecoveryAuditLog.payment_event_id == ev.id)
-        )
-        logs = log_result.scalars().all()
-    assert len(logs) == 2
-    action_types = {log.action_type for log in logs}
-    assert "WORKFLOW_INITIATED"  in action_types
-    assert "DOWNGRADE_OFFER_SENT" in action_types
-
-
-async def test_insufficient_funds_low_ticket_creates_silent_retry_workflow() -> None:
-    """Low-ticket insufficient funds → SILENT_MANDATE_RETRY."""
-    eng, factory = _make_test_factory()
-    await _bootstrap(eng)
-
-    ev = _event(error_code="BAD_REQUEST_ERROR", error_reason="low_balance", amount=99.0)
-    async with factory() as session:
-        session.add(ev)
-        await session.commit()
-
-    await process_payment_event(ev.id, _session_factory=factory)
-
-    async with factory() as session:
-        wf_result = await session.execute(
-            select(RecoveryWorkflow).where(RecoveryWorkflow.payment_event_id == ev.id)
-        )
-        wf = wf_result.scalar_one()
-
-    assert wf.diagnosed_cause == DiagnosedCause.INSUFFICIENT_FUNDS_ADAPTIVE
-    assert wf.strategy        == RecoveryStrategy.SILENT_MANDATE_RETRY
-
-    # Two audit logs: WORKFLOW_INITIATED + SILENT_RETRY_SCHEDULED
-    async with factory() as session:
-        log_result = await session.execute(
-            select(RecoveryAuditLog).where(RecoveryAuditLog.payment_event_id == ev.id)
-        )
-        logs = log_result.scalars().all()
-    assert len(logs) == 2
-
-
-async def test_payment_event_status_updated_to_in_recovery() -> None:
-    """PaymentEvent.status must be IN_RECOVERY after the engine processes it."""
-    eng, factory = _make_test_factory()
-    await _bootstrap(eng)
-
-    ev = _event(error_code="GATEWAY_ERROR", error_reason="bank_offline", amount=299.0)
-    async with factory() as session:
-        session.add(ev)
-        await session.commit()
-
-    assert ev.status == PaymentStatus.AT_RISK   # precondition
-
-    await process_payment_event(ev.id, _session_factory=factory)
-
-    async with factory() as session:
-        fetched = await session.get(PaymentEvent, ev.id)
-
-    assert fetched is not None
-    assert fetched.status == PaymentStatus.IN_RECOVERY
-
-
-async def test_audit_log_created_with_correct_action_type() -> None:
-    """Both audit logs (WORKFLOW_INITIATED + execution action) must exist after processing."""
-    eng, factory = _make_test_factory()
-    await _bootstrap(eng)
-
-    ev = _event(error_code="BAD_REQUEST_ERROR", error_reason="card_declined", amount=499.0)
-    async with factory() as session:
-        session.add(ev)
-        await session.commit()
-
-    await process_payment_event(ev.id, _session_factory=factory)
-
-    async with factory() as session:
-        log_result = await session.execute(
-            select(RecoveryAuditLog).where(RecoveryAuditLog.payment_event_id == ev.id)
-        )
-        all_logs = log_result.scalars().all()
-
-    # Must have exactly 2 audit log entries
-    assert len(all_logs) == 2, f"Expected 2 audit logs, found {len(all_logs)}"
-    action_types = {log.action_type for log in all_logs}
-    assert "WORKFLOW_INITIATED" in action_types
-    assert "WHATSAPP_NUDGE_SENT" in action_types   # card_declined → SECURE_PAYMENT_LINK
-
-    # Log 1: diagnosis log
-    diag_log = next(l for l in all_logs if l.action_type == "WORKFLOW_INITIATED")
-    assert diag_log.channel      == "SYSTEM"
-    assert diag_log.reasoning    is not None
-    assert len(diag_log.reasoning) > 10
-    assert diag_log.metadata_json is not None
-    diag_meta = json.loads(diag_log.metadata_json)
-    assert diag_meta["diagnosed_cause"] == "EXPIRED_PAYMENT_METHOD"
-    assert diag_meta["strategy"]         == "SECURE_PAYMENT_LINK"
-    assert isinstance(diag_meta["max_steps"], int)
-
-    # Log 2: execution log
-    exec_log = next(l for l in all_logs if l.action_type == "WHATSAPP_NUDGE_SENT")
-    assert exec_log.channel        == "WHATSAPP"
-    assert exec_log.metadata_json  is not None
-    exec_meta = json.loads(exec_log.metadata_json)
-    assert exec_meta["status"]   == "delivered"
-    assert exec_meta["channel"]  == "whatsapp"
-    assert "payment_link" in exec_meta
+    assert wf.max_steps       == 4  # high-ticket gets an extra step
 
 
 async def test_default_fallback_routing() -> None:
@@ -316,53 +415,13 @@ async def test_default_fallback_routing() -> None:
     assert wf.diagnosed_cause == DiagnosedCause.MANDATE_DECLINED
     assert wf.strategy        == RecoveryStrategy.SECURE_PAYMENT_LINK
 
-    # Two audit logs: WORKFLOW_INITIATED + WHATSAPP_NUDGE_SENT
-    async with factory() as session:
-        log_result = await session.execute(
-            select(RecoveryAuditLog).where(RecoveryAuditLog.payment_event_id == ev.id)
-        )
-        logs = log_result.scalars().all()
-    assert len(logs) == 2
-    action_types = {log.action_type for log in logs}
-    assert "WORKFLOW_INITIATED"  in action_types
-    assert "WHATSAPP_NUDGE_SENT" in action_types
 
-
-async def test_execution_audit_log_metadata_is_populated() -> None:
-    """The execution audit log must contain valid, parseable JSON metadata."""
+async def test_workflow_initial_state() -> None:
+    """Newly created workflow must have correct default state values."""
     eng, factory = _make_test_factory()
     await _bootstrap(eng)
 
-    # Gateway error → SILENT_RETRY_SCHEDULED → metadata has status=scheduled_with_razorpay
-    ev = _event(error_code="GATEWAY_ERROR", error_reason="timeout", amount=299.0)
-    async with factory() as session:
-        session.add(ev)
-        await session.commit()
-
-    await process_payment_event(ev.id, _session_factory=factory)
-
-    async with factory() as session:
-        log_result = await session.execute(
-            select(RecoveryAuditLog).where(
-                RecoveryAuditLog.payment_event_id == ev.id,
-                RecoveryAuditLog.action_type == "SILENT_RETRY_SCHEDULED",
-            )
-        )
-        exec_log = log_result.scalar_one()
-
-    assert exec_log.metadata_json is not None
-    meta = json.loads(exec_log.metadata_json)
-    assert meta["status"]  == "scheduled_with_razorpay"
-    assert meta["channel"] == "SYSTEM"
-
-
-async def test_already_in_recovery_is_skipped() -> None:
-    """If a PaymentEvent is already IN_RECOVERY, the engine must be a no-op."""
-    eng, factory = _make_test_factory()
-    await _bootstrap(eng)
-
-    ev = _event(error_code="GATEWAY_ERROR", error_reason="timeout")
-    ev.status = PaymentStatus.IN_RECOVERY   # pre-set
+    ev = _event(error_code="GATEWAY_ERROR", error_reason="bank_offline", amount=299.0)
     async with factory() as session:
         session.add(ev)
         await session.commit()
@@ -373,7 +432,9 @@ async def test_already_in_recovery_is_skipped() -> None:
         wf_result = await session.execute(
             select(RecoveryWorkflow).where(RecoveryWorkflow.payment_event_id == ev.id)
         )
-        workflows = wf_result.scalars().all()
+        wf = wf_result.scalar_one()
 
-    # No workflow should have been created
-    assert workflows == [], "Engine should skip events that are already IN_RECOVERY"
+    assert wf.current_step == 1
+    assert wf.retry_count  == 0
+    assert wf.is_active    is True
+    assert wf.resolved_at  is None
