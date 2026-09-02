@@ -254,6 +254,146 @@
       </div>
     </section>
 
+    <!-- Track 03 Scenario Studio Section -->
+    <section class="bg-gradient-to-br from-brand-card via-[#151D29] to-[#111722] p-6 rounded-2xl border border-brand-border shadow-2xl relative overflow-hidden">
+      <div class="absolute -top-16 -right-16 w-80 h-80 bg-brand-primary/10 rounded-full blur-3xl pointer-events-none"></div>
+
+      <div class="flex flex-col sm:flex-row sm:items-center justify-between pb-4 border-b border-brand-border gap-2">
+        <div class="flex items-center space-x-3">
+          <div class="w-3 h-3 rounded-full bg-brand-primary pulse-dot"></div>
+          <div>
+            <h2 class="text-lg font-bold text-white tracking-tight flex items-center space-x-2">
+              <span>Track 03 Scenario Studio</span>
+              <span class="px-2 py-0.5 text-[10px] font-bold bg-brand-primary/20 text-brand-accent rounded border border-brand-primary/40 uppercase">Deterministic Hackathon Demos</span>
+            </h2>
+            <p class="text-xs text-brand-textMuted mt-0.5">
+              Execute live autonomous recovery pipelines across dynamic downselling, policy guardrails, escalation limits, and offline fallbacks.
+            </p>
+          </div>
+        </div>
+        <span class="text-xs font-mono text-brand-textMuted bg-brand-bg px-2.5 py-1 rounded-md border border-brand-border">
+          POST /api/v1/demo/scenario/{1..4}
+        </span>
+      </div>
+
+      <!-- 4 Scenario Cards Grid -->
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mt-5">
+
+        <!-- Scenario 1 Card -->
+        <div class="bg-brand-bg/80 hover:bg-brand-bg p-4 rounded-xl border border-brand-border hover:border-brand-primary/60 transition duration-200 flex flex-col justify-between shadow-md">
+          <div class="space-y-2">
+            <div class="flex items-center justify-between">
+              <span class="px-2 py-0.5 text-[10px] font-bold bg-brand-success/15 text-brand-success rounded border border-brand-success/30">Scenario 1</span>
+              <span class="text-xs font-mono text-brand-textMuted">₹12,000 → ₹6,000</span>
+            </div>
+            <h4 class="font-bold text-sm text-white">Annual Sub + Insufficient Funds</h4>
+            <p class="text-xs text-brand-textMuted leading-relaxed">
+              High-ticket annual plan failure. AI triggers 50% plan downsell, Guardrail approves (<span class="text-brand-success font-mono">≥ ₹500</span>), and customer accepts.
+            </p>
+          </div>
+          <button onclick="runDemoScenario(1)" id="scenarioBtn1" class="mt-4 w-full py-2 bg-gradient-to-r from-brand-primary/90 to-brand-accent/90 hover:from-brand-primary hover:to-brand-accent text-white text-xs font-semibold rounded-lg shadow transition flex items-center justify-center space-x-1.5">
+            <span>▶ Run Downsell Demo</span>
+          </button>
+        </div>
+
+        <!-- Scenario 2 Card -->
+        <div class="bg-brand-bg/80 hover:bg-brand-bg p-4 rounded-xl border border-brand-border hover:border-brand-warning/60 transition duration-200 flex flex-col justify-between shadow-md">
+          <div class="space-y-2">
+            <div class="flex items-center justify-between">
+              <span class="px-2 py-0.5 text-[10px] font-bold bg-brand-warning/15 text-brand-warning rounded border border-brand-warning/30">Scenario 2</span>
+              <span class="text-xs font-mono text-brand-textMuted">₹199 Gate</span>
+            </div>
+            <h4 class="font-bold text-sm text-white">Micro-Transaction Policy Gate</h4>
+            <p class="text-xs text-brand-textMuted leading-relaxed">
+              Low-ticket charge. AI suggests downgrade, but <span class="text-brand-warning font-semibold">Guardrail Rule 1b</span> overrides to silent retry (<span class="text-brand-warning font-mono">&lt; ₹500</span> limit).
+            </p>
+          </div>
+          <button onclick="runDemoScenario(2)" id="scenarioBtn2" class="mt-4 w-full py-2 bg-gradient-to-r from-amber-600/90 to-brand-warning/90 hover:from-amber-600 hover:to-brand-warning text-white text-xs font-semibold rounded-lg shadow transition flex items-center justify-center space-x-1.5">
+            <span>▶ Run Guardrail Gate</span>
+          </button>
+        </div>
+
+        <!-- Scenario 3 Card -->
+        <div class="bg-brand-bg/80 hover:bg-brand-bg p-4 rounded-xl border border-brand-border hover:border-brand-danger/60 transition duration-200 flex flex-col justify-between shadow-md">
+          <div class="space-y-2">
+            <div class="flex items-center justify-between">
+              <span class="px-2 py-0.5 text-[10px] font-bold bg-brand-danger/15 text-brand-danger rounded border border-brand-danger/30">Scenario 3</span>
+              <span class="text-xs font-mono text-brand-textMuted">Attempt Limit</span>
+            </div>
+            <h4 class="font-bold text-sm text-white">Autonomous Escalation Ceiling</h4>
+            <p class="text-xs text-brand-textMuted leading-relaxed">
+              Attempt 1 times out. On Attempt 2, <span class="text-brand-danger font-semibold">Guardrail Rule 2</span> hits attempt ceiling, forcing <span class="font-mono">ESCALATE_TO_HUMAN</span>.
+            </p>
+          </div>
+          <button onclick="runDemoScenario(3)" id="scenarioBtn3" class="mt-4 w-full py-2 bg-gradient-to-r from-red-600/90 to-brand-danger/90 hover:from-red-600 hover:to-brand-danger text-white text-xs font-semibold rounded-lg shadow transition flex items-center justify-center space-x-1.5">
+            <span>▶ Run Escalation Demo</span>
+          </button>
+        </div>
+
+        <!-- Scenario 4 Card -->
+        <div class="bg-brand-bg/80 hover:bg-brand-bg p-4 rounded-xl border border-brand-border hover:border-purple-500/60 transition duration-200 flex flex-col justify-between shadow-md">
+          <div class="space-y-2">
+            <div class="flex items-center justify-between">
+              <span class="px-2 py-0.5 text-[10px] font-bold bg-purple-500/15 text-purple-400 rounded border border-purple-500/30">Scenario 4</span>
+              <span class="text-xs font-mono text-brand-textMuted">Fault Injection</span>
+            </div>
+            <h4 class="font-bold text-sm text-white">Gemini API Outage Resilience</h4>
+            <p class="text-xs text-brand-textMuted leading-relaxed">
+              Simulated upstream 503 LLM timeout. Engine catches exception and safely falls back to <span class="text-purple-400 font-mono">[FALLBACK]</span> payment link.
+            </p>
+          </div>
+          <button onclick="runDemoScenario(4)" id="scenarioBtn4" class="mt-4 w-full py-2 bg-gradient-to-r from-purple-600/90 to-indigo-600/90 hover:from-purple-600 hover:to-indigo-600 text-white text-xs font-semibold rounded-lg shadow transition flex items-center justify-center space-x-1.5">
+            <span>▶ Run Outage Test</span>
+          </button>
+        </div>
+
+      </div>
+
+      <!-- Live Scenario Execution Output Drawer -->
+      <div id="scenarioResultContainer" class="hidden mt-6 bg-[#0E141D] rounded-xl border border-brand-border p-5 transition-all">
+        <div class="flex items-center justify-between pb-3 border-b border-brand-border">
+          <div class="flex items-center space-x-2">
+            <span class="w-2.5 h-2.5 rounded-full bg-brand-success pulse-dot"></span>
+            <span id="resScenarioTitle" class="font-bold text-sm text-white">Scenario Execution Result</span>
+          </div>
+          <button onclick="document.getElementById('scenarioResultContainer').classList.add('hidden')" class="text-xs text-brand-textMuted hover:text-white">✕ Close Output</button>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mt-4 text-xs">
+          <div class="bg-brand-bg p-3 rounded-lg border border-brand-border">
+            <span class="text-brand-textMuted font-mono block text-[10px] uppercase">AI Recommendation</span>
+            <span id="resAiRec" class="font-bold text-white text-xs mt-1 block">--</span>
+            <span id="resAiConf" class="text-brand-textMuted text-[11px]">Conf: --</span>
+          </div>
+          <div class="bg-brand-bg p-3 rounded-lg border border-brand-border">
+            <span class="text-brand-textMuted font-mono block text-[10px] uppercase">Guardrail Outcome</span>
+            <span id="resGuardrail" class="font-bold text-xs mt-1 block">--</span>
+            <span id="resGuardrailReason" class="text-brand-textMuted text-[11px] truncate block">--</span>
+          </div>
+          <div class="bg-brand-bg p-3 rounded-lg border border-brand-border">
+            <span class="text-brand-textMuted font-mono block text-[10px] uppercase">Executed Strategy</span>
+            <span id="resStrategy" class="font-bold text-brand-accent text-xs mt-1 block">--</span>
+            <span id="resAction" class="text-brand-textMuted text-[11px] block">--</span>
+          </div>
+          <div class="bg-brand-bg p-3 rounded-lg border border-brand-border">
+            <span class="text-brand-textMuted font-mono block text-[10px] uppercase">Revenue Captured</span>
+            <span id="resRevenue" class="font-bold text-brand-success text-xs mt-1 block">--</span>
+            <span id="resStatus" class="text-brand-textMuted text-[11px] block">--</span>
+          </div>
+        </div>
+
+        <!-- Audit trail snippet -->
+        <div class="mt-4 pt-3 border-t border-brand-border/60">
+          <div class="flex items-center justify-between mb-2">
+            <span class="text-[11px] font-mono text-brand-textMuted uppercase">Intervention Audit Trail Entry</span>
+            <span id="resSimulatedTag" class="px-2 py-0.5 text-[10px] font-semibold bg-brand-primary/20 text-brand-accent rounded border border-brand-primary/30">Live Pipeline Run</span>
+          </div>
+          <div id="resAuditLogs" class="space-y-1.5 font-mono text-[11px] text-brand-textLight bg-brand-bg/90 p-3 rounded-lg border border-brand-border/80">
+          </div>
+        </div>
+      </div>
+    </section>
+
     <!-- Breakdowns Section (Causes vs Strategies) -->
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
       
@@ -604,6 +744,76 @@
         ffSpinner.classList.add('hidden');
         ffIcon.classList.remove('hidden');
         ffBtnText.textContent = 'Fast-Forward Outcomes';
+      }
+    }
+
+    // Interactive Demo Studio Handler (Phase 8C)
+    async function runDemoScenario(scenarioId) {
+      const btn = document.getElementById(`scenarioBtn${scenarioId}`);
+      const originalText = btn.innerHTML;
+      btn.disabled = true;
+      btn.innerHTML = `<span class="animate-spin inline-block mr-1">↻</span> Running Scenario ${scenarioId}...`;
+
+      try {
+        const res = await fetch(`/api/v1/demo/scenario/${scenarioId}`, {
+          method: 'POST'
+        });
+
+        if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+        const data = await res.json();
+
+        // Populate Result Drawer
+        document.getElementById('resScenarioTitle').textContent = `Scenario ${scenarioId}: ${data.title}`;
+        document.getElementById('resAiRec').textContent = data.ai_recommendation || data.fallback_strategy || 'N/A';
+        document.getElementById('resAiConf').textContent = `Conf: ${data.ai_confidence !== undefined ? (data.ai_confidence * 100).toFixed(0) + '%' : (data.confidence_score !== undefined ? (data.confidence_score * 100).toFixed(0) + '%' : 'N/A')}`;
+        
+        const guardrailEl = document.getElementById('resGuardrail');
+        guardrailEl.textContent = data.guardrail_decision || 'APPROVED';
+        if ((data.guardrail_decision || '').includes('OVERRIDDEN')) {
+          guardrailEl.className = 'font-bold text-brand-warning text-xs mt-1 block';
+        } else {
+          guardrailEl.className = 'font-bold text-brand-success text-xs mt-1 block';
+        }
+        document.getElementById('resGuardrailReason').textContent = data.guardrail_reason || (data.guardrail_decision === 'APPROVED' ? 'Passed all business rules & limits' : data.guardrail_decision);
+
+        document.getElementById('resStrategy').textContent = data.executed_strategy || data.fallback_strategy || 'N/A';
+        document.getElementById('resAction').textContent = data.outreach_action || (data.workflow_stopped ? 'Zero Outreach (Escalated)' : 'System Fallback Dispatched');
+
+        const revEl = document.getElementById('resRevenue');
+        revEl.textContent = formatINR(data.recovered_amount || 0);
+        if (data.downgrade_applied) {
+          revEl.innerHTML = `${formatINR(data.recovered_amount)} <span class="text-[10px] text-brand-accent">(50% downsell)</span>`;
+        }
+        document.getElementById('resStatus').textContent = `Status: ${data.final_status || 'INTERVENTION_ACTIVE'}`;
+
+        document.getElementById('resSimulatedTag').textContent = data.simulated_action ? `Simulated Recovery (${data.simulated_action})` : 'Live Pipeline Run';
+
+        // Render audit trail snippets
+        const auditContainer = document.getElementById('resAuditLogs');
+        if (data.audit_trail && data.audit_trail.length > 0) {
+          auditContainer.innerHTML = data.audit_trail.map(log => `
+            <div class="border-b border-brand-border/40 pb-1.5 last:border-b-0">
+              <div class="flex items-center justify-between text-brand-textMuted">
+                <span class="text-brand-accent font-semibold">${log.strategy}</span>
+                <span>${log.channel} · ${log.guardrail_decision}</span>
+              </div>
+              <div class="text-[10px] text-brand-textLight mt-0.5">${log.reasoning || 'No details'}</div>
+            </div>
+          `).join('');
+        } else {
+          auditContainer.innerHTML = `<div>Event ID: ${data.event_id} | Initial Amount: ${formatINR(data.original_amount)}</div>`;
+        }
+
+        document.getElementById('scenarioResultContainer').classList.remove('hidden');
+        showToast(`⚡ Scenario ${scenarioId} executed: ${data.title}`, 'success');
+
+        await fetchMetrics();
+      } catch (err) {
+        console.error('Error running scenario:', err);
+        showToast(`Failed to run scenario ${scenarioId}: ` + err.message, 'error');
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = originalText;
       }
     }
 

@@ -50,6 +50,7 @@ from app.models.orm import (
 from app.models.schemas import AgentDecision
 from app.services.outreach import OutreachService
 from app.services.razorpay_client import RazorpayService
+from app.services.reconciliation import reconcile_payment_success
 
 logger = logging.getLogger(__name__)
 
@@ -294,21 +295,45 @@ async def _run_engine(
         amount_inr=event.amount,
     )
 
-    # ── 5. Recovery Agent → raw AgentDecision ────────────────────────────────
-    raw_agent_decision: AgentDecision = await analyze_failure_context(event)
+    # ── 5. Multi-Attempt History & Recovery Agent ─────────────────────────────
+    # Query prior workflows to detect multi-attempt context
+    prev_wf_res = await db.execute(
+        select(RecoveryWorkflow)
+        .where(RecoveryWorkflow.payment_event_id == event_id)
+        .order_by(RecoveryWorkflow.created_at.desc())
+    )
+    existing_wfs = list(prev_wf_res.scalars().all())
+
+    attempt_count = len(existing_wfs) + 1
+    prev_strategy = None
+    prev_intervention_count = 0
+    prev_retry_count = 0
+    if existing_wfs:
+        prev_wf = existing_wfs[0]
+        prev_strategy = getattr(prev_wf.strategy, "value", str(prev_wf.strategy))
+        prev_intervention_count = prev_wf.intervention_count
+        prev_retry_count = prev_wf.retry_count
+
+    raw_agent_decision: AgentDecision = await analyze_failure_context(
+        event,
+        previous_strategy=prev_strategy,
+        attempt_count=attempt_count,
+    )
     raw_strat_str = getattr(raw_agent_decision.recommended_strategy, "value", str(raw_agent_decision.recommended_strategy))
 
     logger.info(
-        "Decision engine: Agent decision for '%s': strategy=%s confidence=%.2f",
+        "Decision engine: Agent decision for '%s' (attempt=%d): strategy=%s confidence=%.2f",
         event_id,
+        attempt_count,
         raw_strat_str,
         raw_agent_decision.confidence_score,
     )
 
     # ── 6. GuardrailEngine → validated AgentDecision ─────────────────────────
-    # Create a stub workflow to pass retry_count — actual workflow created below
+    # Pass existing workflow state (intervention_count / retry_count) to Guardrail
     class _WorkflowStub:
-        retry_count = 0
+        intervention_count = prev_intervention_count
+        retry_count = prev_retry_count
 
     validated_decision: AgentDecision = guardrail_engine.validate_agent_decision(
         raw_agent_decision,
@@ -324,15 +349,19 @@ async def _run_engine(
     )
 
     # ── 7. Create RecoveryWorkflow ────────────────────────────────────────────
+    is_escalation = (validated_strat_str == RecoveryStrategy.ESCALATE_TO_HUMAN.value or validated_strat_str == "ESCALATE_TO_HUMAN")
+    next_intervention_count = prev_intervention_count if is_escalation else (prev_intervention_count + 1)
+
     workflow = RecoveryWorkflow(
         id=str(uuid.uuid4()),
         payment_event_id=event_id,
         diagnosed_cause=diagnosis.cause,
         strategy=RecoveryStrategy(validated_strat_str) if validated_strat_str in RecoveryStrategy._value2member_map_ else validated_strat_str,
-        current_step=1,
+        current_step=attempt_count,
         max_steps=diagnosis.max_steps,
-        retry_count=0,
-        is_active=True,
+        retry_count=prev_retry_count,
+        intervention_count=next_intervention_count,
+        is_active=(not is_escalation),
     )
     db.add(workflow)
 

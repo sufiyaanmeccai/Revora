@@ -214,17 +214,52 @@ Revora/
 
 ---
 
-## 🏆 Buildathon Submission Checklist
+---
 
-- [x] **Track 03 Alignment:** Subscriptions & Recurring Payment Failures.
-- [x] **Webhook Ingestion:** Cryptographically verified Razorpay webhook ingestion.
-- [x] **Semantic Diagnosis:** Classification across network, instrument, and fund errors.
-- [x] **Smart Outreach:** WhatsApp recovery link dispatch and Hinglish voice IVR scripts.
-- [x] **Adaptive Downsell:** Automatic 50% plan restructuring for high-ticket failures.
-- [x] **Auditability:** Immutable audit trail with full reasoning and execution metadata.
-- [x] **Batch Simulation & Metrics:** Batch generation service and summary statistics endpoint.
-- [x] **Operations UI:** Production-ready dark-mode dashboard.
-- [x] **100% Test Coverage:** 48 passing async pytest tests.
+## 🔍 Technical Honesty: Real vs. Simulated Architecture
+
+To maintain complete transparency for hackathon evaluation:
+
+| Component | Status | Details |
+|:---|:---|:---|
+| **Webhook Ingestion** | **REAL** | Verifies HMAC-SHA256 signatures with `hmac.compare_digest`, enforces DB-level unique constraint on `x-razorpay-event-id` for deduplication, and processes `payment.failed`, `payment_link.paid`, `payment.captured`, and `subscription.halted`. |
+| **AI Recovery Agent (Gemini)** | **REAL** | Official `google-genai` SDK with strict Pydantic structured output (`AgentDecision`), multi-attempt prompt context, and automatic offline `[FALLBACK]` resilience when API key is unset or network fails. |
+| **Policy Guardrail Engine** | **REAL** | Strict deterministic Python rule engine acting as final authority: enforces customer consent (Rule 1a), overrides low-ticket downgrades < ₹500 (Rule 1b), caps automated attempts at 2 (Rule 2), and enforces max retries (Rule 3). |
+| **Unified Reconciliation** | **REAL** | Matches non-PII identifiers, calculates exact 50% downgrade accounting vs 100% full recovery, handles late-arrivals/idempotency, and writes immutable `InterventionAuditLog` entries. |
+| **Database & Accounting Layer** | **REAL** | Fully async SQLAlchemy 2.0 ORM with SQLite backend (`PaymentEvent`, `RecoveryWorkflow`, `InterventionAuditLog`). |
+| **Operations UI & Scenario Studio** | **REAL** | Interactive dark-mode dashboard and live Scenario Studio served directly by FastAPI. |
+| **Outbound WhatsApp/Voice Gateway** | **MOCKED** | Generates fully formatted WhatsApp payloads and Hinglish voice call scripts without sending live SMS/carrier calls. |
+| **Customer Payment Action** | **SIMULATED** | Fast-Forward and Demo Studio simulate customer click-through and payment completion to demonstrate closed-loop reconciliation. |
+| **Razorpay Payment Link API** | **MOCKED / STUB** | Generates deterministic Razorpay link URLs (`https://rzp.io/i/mock_<ref_id>`) without live merchant billing credentials. |
+
+---
+
+## 🎮 Interactive Demo Studio (Track 03 Scenarios)
+
+The dashboard and API (`/api/v1/demo/scenarios`) include 4 deterministic scenario runners:
+
+1. **Scenario 1: Annual Sub + Insufficient Funds**  
+   - *Input:* ₹12,000 failed charge on an annual plan.  
+   - *Action:* AI Agent recommends 50% plan downsell (`ADAPTIVE_DOWNGRADE_OFFER`). Guardrail approves (₹12,000 ≥ ₹500). Reconciles customer payment at **₹6,000** (50% captured).
+2. **Scenario 2: Micro-Transaction Policy Gate**  
+   - *Input:* ₹199 micro-subscription failure.  
+   - *Action:* AI suggests downgrade, but **Guardrail Rule 1b** overrides to `SILENT_MANDATE_RETRY` (amount < ₹500).
+3. **Scenario 3: Autonomous Escalation Ceiling**  
+   - *Input:* Recurring card decline.  
+   - *Action:* Attempt 1 times out. On Attempt 2, **Guardrail Rule 2** halts automated recovery (`intervention_count >= 2`) and forces `ESCALATE_TO_HUMAN` to prevent customer harassment.
+4. **Scenario 4: Gemini API Outage Resilience**  
+   - *Input:* Gateway timeout during an upstream Gemini API 503 fault.  
+   - *Action:* Agent catches exception and safely defaults to `SECURE_PAYMENT_LINK` with `[FALLBACK]` audit tag and `confidence_score=0.0`.
+
+---
+
+## 🧪 Running the Test Suite
+
+Revora is validated with **95 automated async pytest tests** covering 100% of the core recovery lifecycle:
+
+```bash
+.\venv\Scripts\pytest.exe app/tests/ -v
+```
 
 ---
 

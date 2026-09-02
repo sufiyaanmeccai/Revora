@@ -79,13 +79,28 @@ _MANDATE_REASONS = frozenset({
 })
 
 
-def _build_analysis_prompt(event: "PaymentEvent") -> str:
+def _build_analysis_prompt(
+    event: "PaymentEvent",
+    previous_strategy: Optional[str] = None,
+    previous_failure_reason: Optional[str] = None,
+    attempt_count: int = 1,
+) -> str:
     """Construct the PII-free prompt sent to the Gemini AI Agent.
 
     Only non-PII context is included: payment amount, error code,
-    error reason. No customer names, emails,
+    error reason, and multi-attempt context. No customer names, emails,
     phones, card details, or UPI IDs are sent to the LLM.
     """
+    multi_attempt_context = ""
+    if attempt_count > 1 or previous_strategy:
+        multi_attempt_context = (
+            f"\nMulti-Attempt Context:\n"
+            f"- Attempt Count: {attempt_count}\n"
+            f"- Previous Strategy: {previous_strategy or 'N/A'}\n"
+            f"- Previous Failure Reason: {previous_failure_reason or 'Customer uncompleted / timeout'}\n"
+            f"Note: The previous recovery strategy was unsuccessful. Adapt your strategy recommendation accordingly.\n"
+        )
+
     return (
         f"You are the Revora AI Revenue Recovery Agent. Analyze the following failed payment event "
         f"and determine the single best recovery strategy, confidence score (0.0 to 1.0), reasoning, "
@@ -93,7 +108,8 @@ def _build_analysis_prompt(event: "PaymentEvent") -> str:
         f"Payment Context (non-PII):\n"
         f"- Amount: ₹{event.amount:.2f} {event.currency}\n"
         f"- Error Code: {event.error_code or 'N/A'}\n"
-        f"- Error Reason: {event.error_reason or 'N/A'}\n\n"
+        f"- Error Reason: {event.error_reason or 'N/A'}\n"
+        f"{multi_attempt_context}\n"
         f"Available Recovery Strategies:\n"
         f"1. SILENT_MANDATE_RETRY: Best for transient network or bank gateway timeouts where retrying without contacting the customer is preferred.\n"
         f"2. SECURE_PAYMENT_LINK: Best for declined/expired cards or abandoned checkouts where the customer needs a quick link via WhatsApp/SMS to complete payment.\n"
@@ -104,13 +120,30 @@ def _build_analysis_prompt(event: "PaymentEvent") -> str:
     )
 
 
-def _fallback_heuristic_analysis(event: "PaymentEvent") -> AgentDecision:
+def _fallback_heuristic_analysis(
+    event: "PaymentEvent",
+    previous_strategy: Optional[str] = None,
+    attempt_count: int = 1,
+) -> AgentDecision:
     """
     Deterministic rule-based fallback when Gemini API is unavailable or disabled.
     Ensures 100% offline stability and deterministic testing.
     """
     code = (event.error_code or "").lower().strip()
     reason = (event.error_reason or "").lower().strip()
+
+    # Multi-attempt heuristic adaptation: if previous silent retry failed, adapt to customer link
+    if attempt_count > 1 and previous_strategy in ("SILENT_MANDATE_RETRY", RecoveryStrategy.SILENT_MANDATE_RETRY):
+        return AgentDecision(
+            recommended_strategy="SECURE_PAYMENT_LINK",
+            confidence_score=0.88,
+            reasoning=(
+                f"[AGENT:HEURISTIC] Multi-attempt adaptive routing (attempt {attempt_count}). "
+                f"Previous strategy '{previous_strategy}' did not resolve the payment. "
+                "Escalating to direct customer outreach via secure payment link."
+            ),
+            requires_consent=False,
+        )
 
     # Signal 1: Network / Gateway failure
     if code in _NETWORK_CODES or reason in _NETWORK_REASONS:
@@ -214,6 +247,9 @@ def _make_system_fallback(reason: str) -> AgentDecision:
 async def analyze_failure_context(
     event: "PaymentEvent",
     _client: Optional[Any] = None,
+    previous_strategy: Optional[str] = None,
+    previous_failure_reason: Optional[str] = None,
+    attempt_count: int = 1,
 ) -> AgentDecision:
     """
     Analyse a failed PaymentEvent and return a structured recovery decision.
@@ -231,6 +267,9 @@ async def analyze_failure_context(
     Args:
         event: The PaymentEvent to analyse.
         _client: Optional pre-configured genai.Client instance (useful for unit tests).
+        previous_strategy: Strategy attempted in the previous recovery cycle (if any).
+        previous_failure_reason: Reason why previous strategy failed (if any).
+        attempt_count: Current attempt sequence number (1-indexed).
 
     Returns:
         A validated AgentDecision object.
@@ -260,9 +299,14 @@ async def analyze_failure_context(
         # API key present + SDK available — attempt live Gemini call.
         try:
             client = genai.Client(api_key=api_key)
-            prompt = _build_analysis_prompt(event)
+            prompt = _build_analysis_prompt(
+                event,
+                previous_strategy=previous_strategy,
+                previous_failure_reason=previous_failure_reason,
+                attempt_count=attempt_count,
+            )
 
-            logger.info("Recovery Agent: Calling Gemini (%s) for event %s", model_name, event.id)
+            logger.info("Recovery Agent: Calling Gemini (%s) for event %s (attempt=%d)", model_name, event.id, attempt_count)
 
             response = client.models.generate_content(
                 model=model_name,
@@ -304,9 +348,14 @@ async def analyze_failure_context(
     # system fallback) to preserve all offline heuristic test coverage.
     try:
         client = _client
-        prompt = _build_analysis_prompt(event)
+        prompt = _build_analysis_prompt(
+            event,
+            previous_strategy=previous_strategy,
+            previous_failure_reason=previous_failure_reason,
+            attempt_count=attempt_count,
+        )
 
-        logger.info("Recovery Agent: Calling injected client for event %s", event.id)
+        logger.info("Recovery Agent: Calling injected client for event %s (attempt=%d)", event.id, attempt_count)
 
         response = client.models.generate_content(
             model=model_name,
@@ -341,7 +390,11 @@ async def analyze_failure_context(
         )
 
     # Heuristic fallback for test/offline path.
-    decision = _fallback_heuristic_analysis(event)
+    decision = _fallback_heuristic_analysis(
+        event,
+        previous_strategy=previous_strategy,
+        attempt_count=attempt_count,
+    )
     logger.info(
         "Recovery Agent: Heuristic decision for %s -> strategy=%s confidence=%.2f",
         event.id,

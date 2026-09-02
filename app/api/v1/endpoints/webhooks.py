@@ -38,6 +38,7 @@ from app.core.database import get_db
 from app.core.security import verify_webhook_signature
 from app.models.orm import PaymentEvent, PaymentStatus
 from app.services.decision_engine import process_payment_event
+from app.services.reconciliation import reconcile_payment_success
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +47,12 @@ router = APIRouter(tags=["Webhooks"])
 # ---------------------------------------------------------------------------
 # Events this handler actively processes (others are acknowledged but ignored)
 # ---------------------------------------------------------------------------
-HANDLED_EVENTS = {"payment.failed", "subscription.halted"}
+HANDLED_EVENTS = {
+    "payment.failed",
+    "subscription.halted",
+    "payment_link.paid",
+    "payment.captured",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -148,19 +154,14 @@ async def razorpay_webhook(
     db: AsyncSession = Depends(get_db),
 ) -> JSONResponse:
     """
-    Razorpay webhook ingestion handler (Phase 8A).
+    Razorpay webhook ingestion handler (Phase 8A/8C).
 
-    Steps:
-      1. Read raw body.
-      2. Verify signature (400 on failure).
-      3. Parse event type.
-      4. For payment.failed / subscription.halted: build PaymentEvent.
-      5. INSERT with IntegrityError guard:
-           - IntegrityError (duplicate razorpay_event_id) → rollback, 200 "ignored".
-           - Success → commit, queue BackgroundTask, return 200 immediately.
+    Supported Events:
+      • payment.failed / subscription.halted → create PaymentEvent, queue decision engine.
+      • payment_link.paid / payment.captured → extract reference, queue unified reconciliation.
 
-    The endpoint NEVER awaits recovery logic — the HTTP 200 is sent before
-    any outreach or AI decision-making runs, preventing Razorpay gateway timeouts.
+    The endpoint NEVER awaits recovery logic — HTTP 200 is sent before
+    any outreach or reconciliation runs, preventing gateway timeouts.
     """
     # ------------------------------------------------------------------ #
     # 1. Read raw body                                                     #
@@ -207,7 +208,61 @@ async def razorpay_webhook(
         )
 
     # ------------------------------------------------------------------ #
-    # 5. Extract payment entity                                            #
+    # 5. Success Webhook Path (payment_link.paid / payment.captured)      #
+    # ------------------------------------------------------------------ #
+    if event_type in ("payment_link.paid", "payment.captured"):
+        payload_container = payload.get("payload", {})
+        entity: Dict[str, Any] = {}
+
+        if "payment_link" in payload_container and "entity" in payload_container["payment_link"]:
+            entity = payload_container["payment_link"]["entity"]
+        elif "payment" in payload_container and "entity" in payload_container["payment"]:
+            entity = payload_container["payment"]["entity"]
+
+        # Extract non-PII reference
+        notes = entity.get("notes") or {}
+        ref_id = (
+            entity.get("reference_id")
+            or notes.get("reference_id")
+            or notes.get("event_id")
+            or entity.get("id")
+            or entity.get("order_id")
+        )
+
+        amount_paise = entity.get("amount_paid") or entity.get("amount") or 0
+        amount_inr = float(amount_paise) / 100.0 if amount_paise else None
+
+        # Check deduplication if x_razorpay_event_id is present
+        if x_razorpay_event_id:
+            from sqlalchemy import select
+            from app.models.orm import InterventionAuditLog
+            existing_event = await db.execute(
+                select(PaymentEvent).where(PaymentEvent.razorpay_event_id == x_razorpay_event_id)
+            )
+            if existing_event.scalar_one_or_none() is not None:
+                logger.info("Duplicate success webhook detected (event_id=%s).", x_razorpay_event_id)
+                return JSONResponse(
+                    status_code=status.HTTP_200_OK,
+                    content={"status": "ignored", "reason": "duplicate_event"},
+                )
+
+        if ref_id:
+            background_tasks.add_task(
+                reconcile_payment_success,
+                payment_identifier=ref_id,
+                amount_paid=amount_inr,
+                source=f"WEBHOOK_{event_type.upper().replace('.', '_')}",
+                raw_payload=body.decode("utf-8", errors="replace"),
+            )
+            logger.info("Reconciliation queued for ref_id=%s (event=%s)", ref_id, event_type)
+
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content={"status": "success", "event": event_type, "reconciled": True, "reference_id": ref_id},
+        )
+
+    # ------------------------------------------------------------------ #
+    # 6. Failure Ingestion Path (payment.failed / subscription.halted)   #
     # ------------------------------------------------------------------ #
     try:
         payment_entity: Dict[str, Any] = payload["payload"]["payment"]["entity"]
@@ -222,22 +277,12 @@ async def razorpay_webhook(
             detail="Malformed payload: payment entity not found.",
         )
 
-    # ------------------------------------------------------------------ #
-    # 6. Build PaymentEvent ORM instance                                  #
-    # ------------------------------------------------------------------ #
     event = _build_payment_event(
         payment_entity,
         body.decode("utf-8", errors="replace"),
         razorpay_event_id=x_razorpay_event_id,
     )
 
-    # ------------------------------------------------------------------ #
-    # 7. INSERT with DB-level idempotency guard                           #
-    #                                                                     #
-    # The UNIQUE constraint on razorpay_event_id means that a duplicate   #
-    # webhook delivery will raise IntegrityError on commit. We catch it,  #
-    # rollback, and return 200 so Razorpay stops retrying.               #
-    # ------------------------------------------------------------------ #
     try:
         db.add(event)
         await db.commit()
@@ -262,11 +307,6 @@ async def razorpay_webhook(
         event.status,
     )
 
-    # ------------------------------------------------------------------ #
-    # 8. Schedule decision engine as a background task                    #
-    # The HTTP 200 response is sent to Razorpay BEFORE this runs.        #
-    # The engine opens its own session — safe after this request closes.  #
-    # ------------------------------------------------------------------ #
     background_tasks.add_task(process_payment_event, event.id)
     logger.info("Decision engine queued for PaymentEvent '%s'.", event.id)
 
