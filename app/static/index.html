@@ -272,11 +272,11 @@
           </div>
         </div>
         <span class="text-xs font-mono text-brand-textMuted bg-brand-bg px-2.5 py-1 rounded-md border border-brand-border">
-          POST /api/v1/demo/scenario/{1..4}
+          POST /api/v1/demo/scenario/{1..7}
         </span>
       </div>
 
-      <!-- 4 Scenario Cards Grid -->
+      <!-- Scenario Cards Grid -->
       <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mt-5">
 
         <!-- Scenario 1 Card -->
@@ -347,6 +347,57 @@
           </button>
         </div>
 
+        <!-- Scenario 5 / A Card (Phase 10) -->
+        <div class="bg-brand-bg/80 hover:bg-brand-bg p-4 rounded-xl border border-brand-border hover:border-emerald-500/60 transition duration-200 flex flex-col justify-between shadow-md">
+          <div class="space-y-2">
+            <div class="flex items-center justify-between">
+              <span class="px-2 py-0.5 text-[10px] font-bold bg-emerald-500/15 text-emerald-400 rounded border border-emerald-500/30">Scenario A (5)</span>
+              <span class="text-xs font-mono text-brand-textMuted">VIP Tier</span>
+            </div>
+            <h4 class="font-bold text-sm text-white">VIP Relationship Retention</h4>
+            <p class="text-xs text-brand-textMuted leading-relaxed">
+              High-value customer (₹15,000, HIGH tier). AI prioritizes full payment link over downsell. Net Recovery: <span class="text-emerald-400 font-mono">₹14,997.50</span>.
+            </p>
+          </div>
+          <button onclick="runDemoScenario(5)" id="scenarioBtn5" class="mt-4 w-full py-2 bg-gradient-to-r from-emerald-600/90 to-teal-600/90 hover:from-emerald-600 hover:to-teal-600 text-white text-xs font-semibold rounded-lg shadow transition flex items-center justify-center space-x-1.5">
+            <span>▶ Run VIP Retention</span>
+          </button>
+        </div>
+
+        <!-- Scenario 6 / B Card (Phase 10) -->
+        <div class="bg-brand-bg/80 hover:bg-brand-bg p-4 rounded-xl border border-brand-border hover:border-orange-500/60 transition duration-200 flex flex-col justify-between shadow-md">
+          <div class="space-y-2">
+            <div class="flex items-center justify-between">
+              <span class="px-2 py-0.5 text-[10px] font-bold bg-orange-500/15 text-orange-400 rounded border border-orange-500/30">Scenario B (6)</span>
+              <span class="text-xs font-mono text-brand-textMuted">Unit Economics</span>
+            </div>
+            <h4 class="font-bold text-sm text-white">Negative Economics Gate</h4>
+            <p class="text-xs text-brand-textMuted leading-relaxed">
+              ₹100 failure with proposed human escalation (Cost ₹150). Priority 3 Guardrail catches negative net value (<span class="text-orange-400 font-mono">-₹150 ≤ 0</span>) and overrides to free retry.
+            </p>
+          </div>
+          <button onclick="runDemoScenario(6)" id="scenarioBtn6" class="mt-4 w-full py-2 bg-gradient-to-r from-orange-600/90 to-amber-600/90 hover:from-orange-600 hover:to-amber-600 text-white text-xs font-semibold rounded-lg shadow transition flex items-center justify-center space-x-1.5">
+            <span>▶ Run Economics Gate</span>
+          </button>
+        </div>
+
+        <!-- Scenario 7 / C Card (Phase 10) -->
+        <div class="bg-brand-bg/80 hover:bg-brand-bg p-4 rounded-xl border border-brand-border hover:border-rose-500/60 transition duration-200 flex flex-col justify-between shadow-md md:col-span-2 lg:col-span-2">
+          <div class="space-y-2">
+            <div class="flex items-center justify-between">
+              <span class="px-2 py-0.5 text-[10px] font-bold bg-rose-500/15 text-rose-400 rounded border border-rose-500/30">Scenario C (7)</span>
+              <span class="text-xs font-mono text-brand-textMuted">Safety &gt; Economics</span>
+            </div>
+            <h4 class="font-bold text-sm text-white">Safety Precedence Over Unit Economics</h4>
+            <p class="text-xs text-brand-textMuted leading-relaxed">
+              Customer reached max intervention limit (count ≥ 2). AI/economic logic prefers a free retry, but <span class="text-rose-400 font-semibold">Priority 4 Guardrail strictly forces ESCALATE_TO_HUMAN</span>. Anti-harassment safety overrides positive unit economics.
+            </p>
+          </div>
+          <button onclick="runDemoScenario(7)" id="scenarioBtn7" class="mt-4 w-full py-2 bg-gradient-to-r from-rose-600/90 to-red-700/90 hover:from-rose-600 hover:to-red-700 text-white text-xs font-semibold rounded-lg shadow transition flex items-center justify-center space-x-1.5">
+            <span>▶ Run Safety Precedence Demo</span>
+          </button>
+        </div>
+
       </div>
 
       <!-- Live Scenario Execution Output Drawer -->
@@ -359,7 +410,7 @@
           <button onclick="document.getElementById('scenarioResultContainer').classList.add('hidden')" class="text-xs text-brand-textMuted hover:text-white">✕ Close Output</button>
         </div>
 
-        <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mt-4 text-xs">
+        <div class="grid grid-cols-1 md:grid-cols-5 gap-3 mt-4 text-xs">
           <div class="bg-brand-bg p-3 rounded-lg border border-brand-border">
             <span class="text-brand-textMuted font-mono block text-[10px] uppercase">AI Recommendation</span>
             <span id="resAiRec" class="font-bold text-white text-xs mt-1 block">--</span>
@@ -376,9 +427,14 @@
             <span id="resAction" class="text-brand-textMuted text-[11px] block">--</span>
           </div>
           <div class="bg-brand-bg p-3 rounded-lg border border-brand-border">
-            <span class="text-brand-textMuted font-mono block text-[10px] uppercase">Revenue Captured</span>
-            <span id="resRevenue" class="font-bold text-brand-success text-xs mt-1 block">--</span>
-            <span id="resStatus" class="text-brand-textMuted text-[11px] block">--</span>
+            <span class="text-brand-textMuted font-mono block text-[10px] uppercase">Customer Value (Simulated)</span>
+            <span id="resCustomerTier" class="font-bold text-teal-400 text-xs mt-1 block">--</span>
+            <span id="resCustomerTenure" class="text-brand-textMuted text-[11px] block">Tenure: --</span>
+          </div>
+          <div class="bg-brand-bg p-3 rounded-lg border border-brand-border">
+            <span class="text-brand-textMuted font-mono block text-[10px] uppercase">Net Recovery Value</span>
+            <span id="resNetValue" class="font-bold text-brand-success text-xs mt-1 block">--</span>
+            <span id="resCostBreakdown" class="text-brand-textMuted text-[11px] block">Cost: ₹0.00</span>
           </div>
         </div>
 
@@ -774,17 +830,19 @@
         } else {
           guardrailEl.className = 'font-bold text-brand-success text-xs mt-1 block';
         }
-        document.getElementById('resGuardrailReason').textContent = data.guardrail_reason || (data.guardrail_decision === 'APPROVED' ? 'Passed all business rules & limits' : data.guardrail_decision);
+        document.getElementById('resGuardrailReason').textContent = data.guardrail_reason || (data.guardrail_decision === 'APPROVED' ? 'Passed all business & economic rules' : data.guardrail_decision);
 
         document.getElementById('resStrategy').textContent = data.executed_strategy || data.fallback_strategy || 'N/A';
-        document.getElementById('resAction').textContent = data.outreach_action || (data.workflow_stopped ? 'Zero Outreach (Escalated)' : 'System Fallback Dispatched');
+        document.getElementById('resAction').textContent = data.outreach_action || (data.workflow_stopped ? 'Zero Outreach (Escalated)' : 'System Dispatched');
 
-        const revEl = document.getElementById('resRevenue');
-        revEl.textContent = formatINR(data.recovered_amount || 0);
-        if (data.downgrade_applied) {
-          revEl.innerHTML = `${formatINR(data.recovered_amount)} <span class="text-[10px] text-brand-accent">(50% downsell)</span>`;
-        }
-        document.getElementById('resStatus').textContent = `Status: ${data.final_status || 'INTERVENTION_ACTIVE'}`;
+        // Phase 10: Customer Value & Economic Indicators
+        document.getElementById('resCustomerTier').textContent = data.customer_value_tier ? `${data.customer_value_tier} Tier` : (data.initial_amount >= 10000 ? 'HIGH Tier' : 'STANDARD Tier');
+        document.getElementById('resCustomerTenure').textContent = data.customer_tenure_months ? `Tenure: ${data.customer_tenure_months}m` : 'Tenure: ~24m';
+
+        const netVal = data.net_recovery_value !== undefined ? data.net_recovery_value : (data.recovered_amount || 0);
+        const costVal = data.intervention_cost !== undefined ? data.intervention_cost : (data.executed_strategy === 'ESCALATE_TO_HUMAN' ? 150.0 : 2.5);
+        document.getElementById('resNetValue').textContent = formatINR(netVal);
+        document.getElementById('resCostBreakdown').textContent = `Est Cost: ${formatINR(costVal)} (Simulated)`;
 
         document.getElementById('resSimulatedTag').textContent = data.simulated_action ? `Simulated Recovery (${data.simulated_action})` : 'Live Pipeline Run';
 
@@ -797,10 +855,13 @@
             const linkTag = hasLink 
               ? `<span class="ml-1.5 px-1.5 py-0.5 text-[9px] font-mono rounded ${isReal ? 'bg-brand-success/20 text-brand-success border border-brand-success/30' : 'bg-brand-warning/20 text-brand-warning border border-brand-warning/30'}">${isReal ? '[Real Testnet Link]' : '[Simulated Link]'}</span>`
               : '';
+            const econBadge = log.net_recovery_value !== undefined 
+              ? `<span class="ml-1.5 px-1.5 py-0.5 text-[9px] font-mono bg-teal-500/15 text-teal-400 rounded border border-teal-500/30">Net: ${formatINR(log.net_recovery_value)}</span>`
+              : '';
             return `
             <div class="border-b border-brand-border/40 pb-1.5 last:border-b-0">
               <div class="flex items-center justify-between text-brand-textMuted">
-                <span class="text-brand-accent font-semibold">${log.strategy} ${linkTag}</span>
+                <span class="text-brand-accent font-semibold">${log.strategy} ${linkTag} ${econBadge}</span>
                 <span>${log.channel} · ${log.guardrail_decision}</span>
               </div>
               <div class="text-[10px] text-brand-textLight mt-0.5">${log.reasoning || 'No details'}</div>

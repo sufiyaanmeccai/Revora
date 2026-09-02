@@ -328,6 +328,10 @@ class InterventionAuditLog(Base):
     # --- Communication channel ---
     channel: Mapped[str] = mapped_column(String(16), nullable=False, default="SYSTEM")
 
+    # --- Phase 10: Unit Economic Fields ---
+    intervention_cost: Mapped[float | None] = mapped_column(Float, nullable=True, default=0.0)
+    net_recovery_value: Mapped[float | None] = mapped_column(Float, nullable=True, default=0.0)
+
     # --- Arbitrary action metadata ---
     metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 

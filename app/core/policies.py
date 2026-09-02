@@ -161,7 +161,33 @@ class GuardrailEngine:
                 event.amount,
             )
 
-        # ── Rule 2: Max intervention_count hard stop → ESCALATE_TO_HUMAN ─────
+        # ── Rule 4 (Priority 3): Economic Viability Gate ─────────────────────
+        from app.services.customer_context import calculate_economics
+        expected_amt, cost, net_val = calculate_economics(strategy_str, event.amount)
+        if net_val <= 0 and strategy_str != RecoveryStrategy.SILENT_MANDATE_RETRY.value:
+            original = strategy_str
+            strategy = RecoveryStrategy.SILENT_MANDATE_RETRY.value
+            strategy_str = strategy
+            reasoning = (
+                f"[GUARDRAIL OVERRIDE] Blocked by Unit Economics: Proposed strategy '{original}' "
+                f"has non-positive Net Recovery Value (Expected: \u20b9{expected_amt:.2f}, Cost: \u20b9{cost:.2f}, "
+                f"Net: \u20b9{net_val:.2f} <= 0). Overridden to SILENT_MANDATE_RETRY (RULE4_NEGATIVE_UNIT_ECONOMICS_BLOCK). "
+                f"Original agent reasoning: {decision.reasoning}"
+            )
+            confidence = max(0.0, confidence - 0.2)
+            consent = False
+            guardrail_notes.append("RULE4_NEGATIVE_UNIT_ECONOMICS_BLOCK")
+            logger.info(
+                "Guardrail Rule 4 triggered: Negative unit economics for strategy '%s' on event %s "
+                "(amount=%.2f, net=%.2f). Overridden to SILENT_MANDATE_RETRY.",
+                original,
+                event.id,
+                event.amount,
+                net_val,
+            )
+
+        # ── Rule 2 (Priority 4): Max intervention_count hard stop → ESCALATE_TO_HUMAN ─────
+        # Safety beats economics! Must evaluate last.
         intervention_count = getattr(workflow, "intervention_count", 0)
         if intervention_count >= 2:
             strategy = RecoveryStrategy.ESCALATE_TO_HUMAN.value
@@ -182,7 +208,7 @@ class GuardrailEngine:
                 event.id,
             )
 
-        # ── Rule 3: Max retries hard stop (legacy) → ESCALATE_TO_HUMAN ───────
+        # ── Rule 3 (Priority 4): Max retries hard stop (legacy) → ESCALATE_TO_HUMAN ───────
         if workflow.retry_count >= MAX_RETRIES:
             strategy = RecoveryStrategy.ESCALATE_TO_HUMAN.value
             reasoning = (

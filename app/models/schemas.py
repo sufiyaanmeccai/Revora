@@ -250,6 +250,11 @@ class InterventionAuditLogRead(BaseModel):
     # Combined reasoning (backward compat)
     reasoning:        Optional[str] = None
     channel:          str
+
+    # Phase 10: Unit Economic Fields
+    intervention_cost:  Optional[float] = 0.0
+    net_recovery_value: Optional[float] = 0.0
+
     metadata_json:    Optional[str] = None
     timestamp:        datetime
     created_at:       datetime

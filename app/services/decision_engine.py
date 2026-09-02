@@ -48,6 +48,10 @@ from app.models.orm import (
     RecoveryWorkflow,
 )
 from app.models.schemas import AgentDecision
+from app.services.customer_context import (
+    CustomerContextResolver,
+    calculate_economics,
+)
 from app.services.outreach import OutreachService
 from app.services.razorpay_client import RazorpayService
 from app.services.reconciliation import reconcile_payment_success
@@ -213,7 +217,7 @@ async def process_payment_event(
     is_simulated: bool = False,
 ) -> None:
     """
-    Run the Phase 7/9 decision engine for a given PaymentEvent ID.
+    Run the Phase 7/9/10 decision engine for a given PaymentEvent ID.
 
     This function is designed to run as a FastAPI ``BackgroundTask``.
     It creates and manages its own database session so it is completely
@@ -242,17 +246,19 @@ async def _run_engine(
     is_simulated: bool = False,
 ) -> None:
     """
-    Phase 7/9 engine logic operating inside an existing AsyncSession.
+    Phase 7/9/10 engine logic operating inside an existing AsyncSession.
 
     Pipeline:
       1. Idempotency check (RECOVERED / ESCALATED_STOPPED → skip)
       2. Transition → DIAGNOSED
-      3. Recovery Agent → AgentDecision (LLM structured output / heuristic fallback)
-      4. GuardrailEngine.validate_agent_decision() → validated AgentDecision
-      5. Create RecoveryWorkflow
-      6. Execute outreach (Testnet Razorpay link or mock) → transition to INTERVENTION_ACTIVE
-      7. Write single comprehensive InterventionAuditLog
-      8. Commit atomically
+      3. Resolve Customer Context (Simulated Value Tier & Tenure)
+      4. Recovery Agent → AgentDecision (LLM structured output / heuristic fallback)
+      5. GuardrailEngine.validate_agent_decision() → validated AgentDecision (Priority 1-4)
+      6. Calculate Unit Economics (Net Recovery Value)
+      7. Create RecoveryWorkflow
+      8. Execute outreach (Testnet Razorpay link or mock) → transition to INTERVENTION_ACTIVE
+      9. Write single comprehensive InterventionAuditLog with economic metrics
+      10. Commit atomically
     """
     if outreach_service is None:
         outreach_service = OutreachService()
@@ -298,8 +304,9 @@ async def _run_engine(
         amount_inr=event.amount,
     )
 
-    # ── 5. Multi-Attempt History & Recovery Agent ─────────────────────────────
-    # Query prior workflows to detect multi-attempt context
+    # ── 5. Customer Context & Multi-Attempt Recovery Agent ───────────────────
+    customer_context = CustomerContextResolver.resolve(event)
+
     prev_wf_res = await db.execute(
         select(RecoveryWorkflow)
         .where(RecoveryWorkflow.payment_event_id == event_id)
@@ -321,19 +328,20 @@ async def _run_engine(
         event,
         previous_strategy=prev_strategy,
         attempt_count=attempt_count,
+        customer_context=customer_context,
     )
     raw_strat_str = getattr(raw_agent_decision.recommended_strategy, "value", str(raw_agent_decision.recommended_strategy))
 
     logger.info(
-        "Decision engine: Agent decision for '%s' (attempt=%d): strategy=%s confidence=%.2f",
+        "Decision engine: Agent decision for '%s' (attempt=%d, tier=%s): strategy=%s confidence=%.2f",
         event_id,
         attempt_count,
+        customer_context.value_tier,
         raw_strat_str,
         raw_agent_decision.confidence_score,
     )
 
-    # ── 6. GuardrailEngine → validated AgentDecision ─────────────────────────
-    # Pass existing workflow state (intervention_count / retry_count) to Guardrail
+    # ── 6. GuardrailEngine → validated AgentDecision (Priority 1-4) ──────────
     class _WorkflowStub:
         intervention_count = prev_intervention_count
         retry_count = prev_retry_count
@@ -345,10 +353,16 @@ async def _run_engine(
     )
     validated_strat_str = getattr(validated_decision.recommended_strategy, "value", str(validated_decision.recommended_strategy))
 
+    # Phase 10: Calculate Unit Economics for the validated strategy
+    expected_amount, intervention_cost, net_recovery_value = calculate_economics(validated_strat_str, event.amount)
+
     logger.info(
-        "Decision engine: Guardrail-validated decision for '%s': strategy=%s",
+        "Decision engine: Guardrail-validated decision for '%s': strategy=%s | Net Value=₹%.2f (Expected=₹%.2f, Cost=₹%.2f)",
         event_id,
         validated_strat_str,
+        net_recovery_value,
+        expected_amount,
+        intervention_cost,
     )
 
     # ── 7. Create RecoveryWorkflow ────────────────────────────────────────────
@@ -435,7 +449,7 @@ async def _run_engine(
             action_type,
         )
 
-    # ── 10. Single comprehensive audit log (Phase 8A structured fields) ────────
+    # ── 10. Single comprehensive audit log (Phase 8A/10 structured fields) ────
     guardrail_overridden = (raw_strat_str != validated_strat_str)
     guardrail_decision_str = "OVERRIDDEN" if guardrail_overridden else "APPROVED"
 
@@ -445,6 +459,12 @@ async def _run_engine(
         "diagnosed_cause":          diagnosis.cause.value if hasattr(diagnosis.cause, "value") else str(diagnosis.cause),
         "workflow_strategy":        workflow_strat_str,
         "max_steps":                diagnosis.max_steps,
+        # Customer Value Intelligence (Phase 10)
+        "customer_value_tier":      customer_context.value_tier,
+        "customer_tenure_months":   customer_context.tenure_months,
+        "expected_recovery_amount": expected_amount,
+        "intervention_cost":        intervention_cost,
+        "net_recovery_value":       net_recovery_value,
         # Guardrail layer (summary in metadata for JSON consumers)
         "guardrail_validated_strategy": validated_strat_str,
         "guardrail_overridden":         guardrail_overridden,
@@ -465,7 +485,7 @@ async def _run_engine(
         id=str(uuid.uuid4()),
         workflow_id=workflow.id,
         payment_event_id=event_id,
-        # Phase 8A: renamed field + structured AI columns
+        # Phase 8A/10: structured fields
         executed_strategy="INTERVENTION_DISPATCHED",
         ai_recommended_strategy=raw_strat_str,
         ai_confidence=raw_agent_decision.confidence_score,
@@ -476,6 +496,8 @@ async def _run_engine(
             f"GUARDRAIL VALIDATION: {validated_decision.reasoning}"
         ),
         channel=channel,
+        intervention_cost=intervention_cost,
+        net_recovery_value=net_recovery_value,
         metadata_json=json.dumps(audit_metadata, default=str),
         timestamp=datetime.now(timezone.utc),
     )

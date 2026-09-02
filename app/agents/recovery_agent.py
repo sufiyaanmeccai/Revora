@@ -84,12 +84,13 @@ def _build_analysis_prompt(
     previous_strategy: Optional[str] = None,
     previous_failure_reason: Optional[str] = None,
     attempt_count: int = 1,
+    customer_context: Optional[Any] = None,
 ) -> str:
     """Construct the PII-free prompt sent to the Gemini AI Agent.
 
     Only non-PII context is included: payment amount, error code,
-    error reason, and multi-attempt context. No customer names, emails,
-    phones, card details, or UPI IDs are sent to the LLM.
+    error reason, simulated customer value signals, and multi-attempt context.
+    No customer names, emails, phones, card details, or UPI IDs are sent to the LLM.
     """
     multi_attempt_context = ""
     if attempt_count > 1 or previous_strategy:
@@ -101,6 +102,18 @@ def _build_analysis_prompt(
             f"Note: The previous recovery strategy was unsuccessful. Adapt your strategy recommendation accordingly.\n"
         )
 
+    customer_signals = ""
+    if customer_context is not None:
+        tier = getattr(customer_context, "value_tier", "STANDARD")
+        tenure = getattr(customer_context, "tenure_months", 12)
+        customer_signals = (
+            f"\nCustomer Value Signals (Simulated Non-PII Context):\n"
+            f"- Customer Value Tier: {tier}\n"
+            f"- Account Tenure: {tenure} months\n"
+            f"- Economic Objective: Maximize Net Recovery Value (Recoverable Amount - Intervention Cost) "
+            f"while preserving high-value customer relationships.\n"
+        )
+
     return (
         f"You are the Revora AI Revenue Recovery Agent. Analyze the following failed payment event "
         f"and determine the single best recovery strategy, confidence score (0.0 to 1.0), reasoning, "
@@ -109,13 +122,14 @@ def _build_analysis_prompt(
         f"- Amount: ₹{event.amount:.2f} {event.currency}\n"
         f"- Error Code: {event.error_code or 'N/A'}\n"
         f"- Error Reason: {event.error_reason or 'N/A'}\n"
+        f"{customer_signals}"
         f"{multi_attempt_context}\n"
-        f"Available Recovery Strategies:\n"
-        f"1. SILENT_MANDATE_RETRY: Best for transient network or bank gateway timeouts where retrying without contacting the customer is preferred.\n"
-        f"2. SECURE_PAYMENT_LINK: Best for declined/expired cards or abandoned checkouts where the customer needs a quick link via WhatsApp/SMS to complete payment.\n"
-        f"3. UPI_AUTOPAY_MIGRATION: Best for recurring mandate failures or UPI pin issues requiring migration to a fresh UPI AutoPay mandate.\n"
-        f"4. ADAPTIVE_DOWNGRADE_OFFER: Best for price-sensitive customers with insufficient funds where offering a discounted tier or alternative billing interval can save the subscriber.\n"
-        f"5. ESCALATE_TO_HUMAN: Best for complex or high-stakes situations requiring human judgment — used when all automated strategies are exhausted or unsuitable.\n\n"
+        f"Available Recovery Strategies & Channel Cost Assumptions:\n"
+        f"1. SILENT_MANDATE_RETRY (Cost: ₹0.00): Best for transient network or bank gateway timeouts where retrying without contacting the customer is preferred.\n"
+        f"2. SECURE_PAYMENT_LINK (Cost: ₹2.50): Best for declined/expired cards, abandoned checkouts, or HIGH-tier retention where a direct WhatsApp/SMS link completes full recovery.\n"
+        f"3. UPI_AUTOPAY_MIGRATION (Cost: ₹2.50): Best for recurring mandate failures requiring migration to a fresh UPI AutoPay mandate.\n"
+        f"4. ADAPTIVE_DOWNGRADE_OFFER (Cost: ₹2.50): Best for price-sensitive customers with insufficient funds where offering a 50% downsell tier prevents total churn.\n"
+        f"5. ESCALATE_TO_HUMAN (Cost: ₹150.00): High-cost manual operations intervention — only appropriate when automated paths fail or high-touch handling is required.\n\n"
         f"Provide your decision strictly in the requested JSON format matching the schema."
     )
 
@@ -124,6 +138,7 @@ def _fallback_heuristic_analysis(
     event: "PaymentEvent",
     previous_strategy: Optional[str] = None,
     attempt_count: int = 1,
+    customer_context: Optional[Any] = None,
 ) -> AgentDecision:
     """
     Deterministic rule-based fallback when Gemini API is unavailable or disabled.
@@ -131,6 +146,7 @@ def _fallback_heuristic_analysis(
     """
     code = (event.error_code or "").lower().strip()
     reason = (event.error_reason or "").lower().strip()
+    val_tier = getattr(customer_context, "value_tier", "STANDARD") if customer_context else "STANDARD"
 
     # Multi-attempt heuristic adaptation: if previous silent retry failed, adapt to customer link
     if attempt_count > 1 and previous_strategy in ("SILENT_MANDATE_RETRY", RecoveryStrategy.SILENT_MANDATE_RETRY):
@@ -159,7 +175,19 @@ def _fallback_heuristic_analysis(
             requires_consent=False,
         )
 
-    # Signal 2: Card / instrument decline
+    # Signal 2: High Value Tier / VIP Retention check
+    if val_tier == "HIGH" and event.amount >= 10000.0 and reason not in _NETWORK_REASONS:
+        return AgentDecision(
+            recommended_strategy="SECURE_PAYMENT_LINK",
+            confidence_score=0.94,
+            reasoning=(
+                f"[AGENT:HEURISTIC] HIGH-value customer (Tier={val_tier}) with high-ticket payment (₹{event.amount:.2f}). "
+                "Prioritizing full relationship retention via secure payment link over aggressive downsell."
+            ),
+            requires_consent=False,
+        )
+
+    # Signal 3: Card / instrument decline
     if reason in _CARD_REASONS:
         return AgentDecision(
             recommended_strategy="SECURE_PAYMENT_LINK",
@@ -172,7 +200,7 @@ def _fallback_heuristic_analysis(
             requires_consent=False,
         )
 
-    # Signal 3: Insufficient funds
+    # Signal 4: Insufficient funds
     if reason in _FUNDS_REASONS:
         return AgentDecision(
             recommended_strategy="ADAPTIVE_DOWNGRADE_OFFER",
@@ -185,7 +213,7 @@ def _fallback_heuristic_analysis(
             requires_consent=True,
         )
 
-    # Signal 4: Checkout abandoned
+    # Signal 5: Checkout abandoned
     if reason in _ABANDONED_REASONS:
         return AgentDecision(
             recommended_strategy="SECURE_PAYMENT_LINK",
@@ -198,7 +226,7 @@ def _fallback_heuristic_analysis(
             requires_consent=False,
         )
 
-    # Signal 5: Mandate / UPI failures
+    # Signal 6: Mandate / UPI failures
     if reason in _MANDATE_REASONS:
         return AgentDecision(
             recommended_strategy="UPI_AUTOPAY_MIGRATION",
@@ -210,7 +238,7 @@ def _fallback_heuristic_analysis(
             requires_consent=True,
         )
 
-    # Signal 6: Unknown / ambiguous failure
+    # Signal 7: Unknown / ambiguous failure
     return AgentDecision(
         recommended_strategy="SECURE_PAYMENT_LINK",
         confidence_score=0.62,
@@ -250,6 +278,7 @@ async def analyze_failure_context(
     previous_strategy: Optional[str] = None,
     previous_failure_reason: Optional[str] = None,
     attempt_count: int = 1,
+    customer_context: Optional[Any] = None,
 ) -> AgentDecision:
     """
     Analyse a failed PaymentEvent and return a structured recovery decision.
@@ -304,6 +333,7 @@ async def analyze_failure_context(
                 previous_strategy=previous_strategy,
                 previous_failure_reason=previous_failure_reason,
                 attempt_count=attempt_count,
+                customer_context=customer_context,
             )
 
             logger.info("Recovery Agent: Calling Gemini (%s) for event %s (attempt=%d)", model_name, event.id, attempt_count)
@@ -353,6 +383,7 @@ async def analyze_failure_context(
             previous_strategy=previous_strategy,
             previous_failure_reason=previous_failure_reason,
             attempt_count=attempt_count,
+            customer_context=customer_context,
         )
 
         logger.info("Recovery Agent: Calling injected client for event %s (attempt=%d)", event.id, attempt_count)
@@ -394,6 +425,7 @@ async def analyze_failure_context(
         event,
         previous_strategy=previous_strategy,
         attempt_count=attempt_count,
+        customer_context=customer_context,
     )
     logger.info(
         "Recovery Agent: Heuristic decision for %s -> strategy=%s confidence=%.2f",
