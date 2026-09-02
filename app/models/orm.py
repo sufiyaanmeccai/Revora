@@ -77,12 +77,12 @@ class DiagnosedCause(str, enum.Enum):
 
 
 class RecoveryStrategy(str, enum.Enum):
-    """Recovery strategy selected by the AI orchestration agent."""
+    """Recovery strategy selected by the AI orchestration agent (Phase 8B)."""
     SILENT_MANDATE_RETRY        = "SILENT_MANDATE_RETRY"
     SECURE_PAYMENT_LINK         = "SECURE_PAYMENT_LINK"
     UPI_AUTOPAY_MIGRATION       = "UPI_AUTOPAY_MIGRATION"
     ADAPTIVE_DOWNGRADE_OFFER    = "ADAPTIVE_DOWNGRADE_OFFER"
-    HINGLISH_VOICE_OUTREACH     = "HINGLISH_VOICE_OUTREACH"
+    ESCALATE_TO_HUMAN           = "ESCALATE_TO_HUMAN"
 
 
 # --------------------------------------------------------------------------- #

@@ -300,7 +300,7 @@
           <div class="w-2.5 h-2.5 rounded-full bg-brand-warning"></div>
           <h3 class="font-bold text-white text-base">Intervention Audit Trail Breakdown</h3>
         </div>
-        <span class="text-xs text-brand-textMuted font-mono">Immutable Compliance Ledger (RecoveryAuditLog)</span>
+        <span class="text-xs text-brand-textMuted font-mono">Intervention Audit Log (InterventionAuditLog · Guardrail Verified)</span>
       </div>
 
       <div id="actionsContainer" class="mt-4 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
@@ -504,9 +504,10 @@
       }
 
       const cardsHtml = actions.map(act => {
-        const cleanName = (act.action_type || 'UNKNOWN').replace(/_/g, ' ');
+        const rawName = act.executed_strategy || act.action_type || 'UNKNOWN';
+        const cleanName = rawName.replace(/_/g, ' ');
         return `
-          <div class="bg-brand-bg/80 p-3.5 rounded-xl border border-brand-border/80 flex flex-col justify-between">
+          <div class="bg-brand-bg/80 p-3.5 rounded-xl border border-brand-border/80 flex flex-col justify-between hover:border-brand-warning/40 transition">
             <span class="text-[11px] font-mono text-brand-textMuted uppercase">${cleanName}</span>
             <div class="text-xl font-bold text-white mt-1">${act.count} <span class="text-xs font-normal text-brand-textMuted">events</span></div>
           </div>

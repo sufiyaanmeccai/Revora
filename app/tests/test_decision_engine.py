@@ -47,6 +47,9 @@ from app.models.orm import (
     RecoveryStrategy,
     RecoveryWorkflow,
 )
+from unittest.mock import AsyncMock, patch
+
+from app.models.schemas import AgentDecision
 from app.services.decision_engine import _diagnose, process_payment_event
 
 # --------------------------------------------------------------------------- #
@@ -291,7 +294,18 @@ async def test_gateway_error_creates_network_failure_workflow() -> None:
         session.add(ev)
         await session.commit()
 
-    await process_payment_event(ev.id, _session_factory=factory)
+    # Inject heuristic-equivalent agent decision so no API key is required
+    mock_decision = AgentDecision(
+        recommended_strategy="SILENT_MANDATE_RETRY",
+        confidence_score=0.93,
+        reasoning="[AGENT:HEURISTIC] Transient network disruption.",
+        requires_consent=False,
+    )
+    with patch(
+        "app.services.decision_engine.analyze_failure_context",
+        new=AsyncMock(return_value=mock_decision),
+    ):
+        await process_payment_event(ev.id, _session_factory=factory)
 
     async with factory() as session:
         wf_result = await session.execute(
@@ -305,6 +319,7 @@ async def test_gateway_error_creates_network_failure_workflow() -> None:
     assert wf.current_step    == 1
 
 
+
 async def test_card_declined_audit_log_metadata() -> None:
     """Card declined → SECURE_PAYMENT_LINK. Audit log metadata must have outreach_action."""
     eng, factory = _make_test_factory()
@@ -315,7 +330,17 @@ async def test_card_declined_audit_log_metadata() -> None:
         session.add(ev)
         await session.commit()
 
-    await process_payment_event(ev.id, _session_factory=factory)
+    mock_decision = AgentDecision(
+        recommended_strategy="SECURE_PAYMENT_LINK",
+        confidence_score=0.90,
+        reasoning="[AGENT:HEURISTIC] Failure indicates an expired or declined payment instrument.",
+        requires_consent=False,
+    )
+    with patch(
+        "app.services.decision_engine.analyze_failure_context",
+        new=AsyncMock(return_value=mock_decision),
+    ):
+        await process_payment_event(ev.id, _session_factory=factory)
 
     async with factory() as session:
         log_result = await session.execute(
@@ -333,13 +358,13 @@ async def test_card_declined_audit_log_metadata() -> None:
 async def test_guardrail_blocks_downgrade_for_low_ticket_in_pipeline() -> None:
     """
     Integration: Low-ticket insufficient_funds agent recommends ADAPTIVE_DOWNGRADE_OFFER,
-    but guardrail must override to SECURE_PAYMENT_LINK.
+    but guardrail must override to SILENT_MANDATE_RETRY (Phase 8B Rule 1b).
     The workflow.strategy must reflect the guardrail-validated decision.
     """
     eng, factory = _make_test_factory()
     await _bootstrap(eng)
 
-    # Amount < ₹500 triggers Rule 1 in guardrail
+    # Amount < ₹500 triggers Rule 1b in guardrail
     ev = _event(
         error_code="BAD_REQUEST_ERROR",
         error_reason="insufficient_funds",
@@ -349,7 +374,17 @@ async def test_guardrail_blocks_downgrade_for_low_ticket_in_pipeline() -> None:
         session.add(ev)
         await session.commit()
 
-    await process_payment_event(ev.id, _session_factory=factory)
+    mock_decision = AgentDecision(
+        recommended_strategy="ADAPTIVE_DOWNGRADE_OFFER",
+        confidence_score=0.85,
+        reasoning="[AGENT] Insufficient funds — downgrade offer recommended.",
+        requires_consent=True,
+    )
+    with patch(
+        "app.services.decision_engine.analyze_failure_context",
+        new=AsyncMock(return_value=mock_decision),
+    ):
+        await process_payment_event(ev.id, _session_factory=factory)
 
     async with factory() as session:
         wf_result = await session.execute(
@@ -357,9 +392,9 @@ async def test_guardrail_blocks_downgrade_for_low_ticket_in_pipeline() -> None:
         )
         wf = wf_result.scalar_one()
 
-    # Guardrail must have overridden ADAPTIVE_DOWNGRADE_OFFER → SECURE_PAYMENT_LINK
-    assert wf.strategy == RecoveryStrategy.SECURE_PAYMENT_LINK, (
-        "Guardrail should override downgrade to SECURE_PAYMENT_LINK for amount < ₹500."
+    # Guardrail must have overridden ADAPTIVE_DOWNGRADE_OFFER → SILENT_MANDATE_RETRY
+    assert wf.strategy == RecoveryStrategy.SILENT_MANDATE_RETRY, (
+        "Guardrail should override downgrade to SILENT_MANDATE_RETRY for amount < ₹500."
     )
 
     # Audit log must document the override
@@ -373,22 +408,39 @@ async def test_guardrail_blocks_downgrade_for_low_ticket_in_pipeline() -> None:
     assert log.ai_recommended_strategy == "ADAPTIVE_DOWNGRADE_OFFER"
 
     meta = json.loads(log.metadata_json)
-    # Guardrail overrode to secure link
-    assert meta["guardrail_validated_strategy"] == "SECURE_PAYMENT_LINK"
+    # Guardrail overrode to silent retry
+    assert meta["guardrail_validated_strategy"] == "SILENT_MANDATE_RETRY"
     assert meta["guardrail_overridden"] is True
 
 
 async def test_insufficient_funds_high_ticket_creates_downgrade_workflow() -> None:
-    """High-ticket insufficient funds → ADAPTIVE_DOWNGRADE_OFFER (guardrail permits it)."""
+    """
+    High-ticket insufficient_funds → INSUFFICIENT_FUNDS_ADAPTIVE + ADAPTIVE_DOWNGRADE_OFFER.
+    Agent decision is mocked to isolate pipeline/guardrail logic from API key requirement.
+    """
     eng, factory = _make_test_factory()
     await _bootstrap(eng)
 
-    ev = _event(error_code="BAD_REQUEST_ERROR", error_reason="insufficient_funds", amount=1999.0)
+    ev = _event(
+        error_code="BAD_REQUEST_ERROR",
+        error_reason="insufficient_funds",
+        amount=1500.0,   # > ₹500 high-ticket
+    )
     async with factory() as session:
         session.add(ev)
         await session.commit()
 
-    await process_payment_event(ev.id, _session_factory=factory)
+    mock_decision = AgentDecision(
+        recommended_strategy="ADAPTIVE_DOWNGRADE_OFFER",
+        confidence_score=0.85,
+        reasoning="[AGENT:HEURISTIC] Insufficient funds — downgrade offer recommended.",
+        requires_consent=True,   # consent=True avoids Rule 1a
+    )
+    with patch(
+        "app.services.decision_engine.analyze_failure_context",
+        new=AsyncMock(return_value=mock_decision),
+    ):
+        await process_payment_event(ev.id, _session_factory=factory)
 
     async with factory() as session:
         wf_result = await session.execute(
@@ -401,6 +453,54 @@ async def test_insufficient_funds_high_ticket_creates_downgrade_workflow() -> No
     assert wf.max_steps       == 4  # high-ticket gets an extra step
 
 
+async def test_escalate_to_human_transitions_to_escalated_stopped() -> None:
+    """
+    Pipeline test: When agent produces ESCALATE_TO_HUMAN:
+    - workflow is created with strategy ESCALATE_TO_HUMAN and is_active=False.
+    - event status is set to ESCALATED_STOPPED.
+    - event status is NOT set to INTERVENTION_ACTIVE.
+    - audit log is written with channel='HUMAN' and executed_strategy='INTERVENTION_DISPATCHED'.
+    """
+    eng, factory = _make_test_factory()
+    await _bootstrap(eng)
+
+    ev = _event(error_code="FRAUD_RISK", error_reason="manual_review_needed", amount=15000.0)
+    async with factory() as session:
+        session.add(ev)
+        await session.commit()
+
+    mock_decision = AgentDecision(
+        recommended_strategy="ESCALATE_TO_HUMAN",
+        confidence_score=0.98,
+        reasoning="[AGENT] High-risk anomaly detected — escalating to human.",
+        requires_consent=False,
+    )
+    with patch(
+        "app.services.decision_engine.analyze_failure_context",
+        new=AsyncMock(return_value=mock_decision),
+    ):
+        await process_payment_event(ev.id, _session_factory=factory)
+
+    async with factory() as session:
+        fetched_ev = await session.get(PaymentEvent, ev.id)
+        wf_result = await session.execute(
+            select(RecoveryWorkflow).where(RecoveryWorkflow.payment_event_id == ev.id)
+        )
+        wf = wf_result.scalar_one()
+        log_result = await session.execute(
+            select(InterventionAuditLog).where(InterventionAuditLog.payment_event_id == ev.id)
+        )
+        log = log_result.scalar_one()
+
+    assert fetched_ev is not None
+    assert fetched_ev.status == PaymentStatus.ESCALATED_STOPPED
+    assert fetched_ev.status != PaymentStatus.INTERVENTION_ACTIVE
+    assert wf.strategy == RecoveryStrategy.ESCALATE_TO_HUMAN
+    assert wf.is_active is False
+    assert wf.resolved_at is not None
+    assert log.channel == "HUMAN"
+
+
 async def test_default_fallback_routing() -> None:
     """Unknown error → MANDATE_DECLINED + SECURE_PAYMENT_LINK."""
     eng, factory = _make_test_factory()
@@ -411,7 +511,17 @@ async def test_default_fallback_routing() -> None:
         session.add(ev)
         await session.commit()
 
-    await process_payment_event(ev.id, _session_factory=factory)
+    mock_decision = AgentDecision(
+        recommended_strategy="SECURE_PAYMENT_LINK",
+        confidence_score=0.62,
+        reasoning="[AGENT:HEURISTIC] Defaulting to secure payment link.",
+        requires_consent=False,
+    )
+    with patch(
+        "app.services.decision_engine.analyze_failure_context",
+        new=AsyncMock(return_value=mock_decision),
+    ):
+        await process_payment_event(ev.id, _session_factory=factory)
 
     async with factory() as session:
         wf_result = await session.execute(
@@ -433,7 +543,17 @@ async def test_workflow_initial_state() -> None:
         session.add(ev)
         await session.commit()
 
-    await process_payment_event(ev.id, _session_factory=factory)
+    mock_decision = AgentDecision(
+        recommended_strategy="SILENT_MANDATE_RETRY",
+        confidence_score=0.93,
+        reasoning="[AGENT:HEURISTIC] Gateway error.",
+        requires_consent=False,
+    )
+    with patch(
+        "app.services.decision_engine.analyze_failure_context",
+        new=AsyncMock(return_value=mock_decision),
+    ):
+        await process_payment_event(ev.id, _session_factory=factory)
 
     async with factory() as session:
         wf_result = await session.execute(

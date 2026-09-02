@@ -484,3 +484,69 @@ async def test_metrics_action_breakdowns_is_list(
 
     assert isinstance(response.json()["action_breakdowns"], list)
 
+
+# ---------------------------------------------------------------------------
+# Phase 8B: 50% downgrade accounting in outcome simulator
+# ---------------------------------------------------------------------------
+
+async def test_downgrade_offer_recovery_records_50_percent_amount(
+    override_db: AsyncSession,
+) -> None:
+    """
+    Phase 8B accounting rule: When ADAPTIVE_DOWNGRADE_OFFER succeeds,
+    workflow.amount_recovered must be exactly 50% of the original event amount.
+
+    This test seeds an INTERVENTION_ACTIVE event with an ADAPTIVE_DOWNGRADE_OFFER
+    workflow, then runs the outcome simulator with mocked randomness to force
+    the success path (roll < SUCCESS_PROBABILITY), and asserts that the
+    recorded amount_recovered == event.amount * 0.5.
+    """
+    import random
+    from unittest.mock import patch
+    from app.services.outcome_simulator import simulate_active_interventions
+    from app.models.orm import RecoveryStrategy, DiagnosedCause
+
+    original_amount = 1200.0
+    expected_recovered = round(original_amount * 0.5, 2)  # 600.0
+
+    ev = PaymentEvent(
+        id=str(uuid.uuid4()),
+        razorpay_event_id=f"evt_DowngradeTest{uuid.uuid4().hex[:8]}",
+        customer_id=f"cust_{uuid.uuid4().hex[:6]}",
+        customer_name="Test User",
+        customer_email="test@revora.ai",
+        customer_contact="+910000000000",
+        amount=original_amount,
+        currency="INR",
+        error_code="BAD_REQUEST_ERROR",
+        error_reason="insufficient_funds",
+        status=PaymentStatus.INTERVENTION_ACTIVE,
+    )
+    wf = RecoveryWorkflow(
+        id=str(uuid.uuid4()),
+        payment_event_id=ev.id,
+        diagnosed_cause=DiagnosedCause.INSUFFICIENT_FUNDS_ADAPTIVE,
+        strategy=RecoveryStrategy.ADAPTIVE_DOWNGRADE_OFFER,
+        current_step=1,
+        max_steps=4,
+        retry_count=0,
+        intervention_count=1,
+        amount_recovered=0.0,
+        is_active=True,
+    )
+    override_db.add_all([ev, wf])
+    await override_db.commit()
+
+    # Force success path: patch random.random to return 0.0 (< SUCCESS_PROBABILITY)
+    with patch("app.services.outcome_simulator.random.random", return_value=0.0):
+        await simulate_active_interventions(override_db)
+
+    # Reload to get updated values
+    await override_db.refresh(wf)
+    assert wf.amount_recovered == pytest.approx(expected_recovered, abs=0.01), (
+        f"ADAPTIVE_DOWNGRADE_OFFER success must record 50% of original amount. "
+        f"Expected {expected_recovered}, got {wf.amount_recovered}."
+    )
+    assert wf.amount_recovered < original_amount, (
+        "Downgrade recovery must be less than the full original amount."
+    )

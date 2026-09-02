@@ -32,6 +32,12 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "sqlite+aiosqlite:///./revora.db"
 
     # ------------------------------------------------------------------ #
+    # Gemini AI Configuration (Phase 8B)                                   #
+    # ------------------------------------------------------------------ #
+    GEMINI_API_KEY: str = ""
+    GEMINI_MODEL: str = "gemini-2.5-flash"
+
+    # ------------------------------------------------------------------ #
     # Pydantic-Settings configuration                                      #
     # ------------------------------------------------------------------ #
     model_config = SettingsConfigDict(

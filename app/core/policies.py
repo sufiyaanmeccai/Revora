@@ -73,22 +73,27 @@ class GuardrailEngine:
         """
         Validate and potentially override an AI agent's recovery decision.
 
-        Rules evaluated in order (first match wins for blocking rules):
+        Rules evaluated in order (first match wins for overriding rules):
 
-        Rule 1 — Ticket-size gate for downgrade offers:
+        Rule 1a — Consent violation gate:
+            If the strategy requires customer consent (ADAPTIVE_DOWNGRADE_OFFER /
+            UPI_AUTOPAY_MIGRATION) but requires_consent=False, redirect to
+            SECURE_PAYMENT_LINK (BLOCKED_CONSENT_VIOLATION).
+            Rationale: Regulatory compliance — strategy cannot execute without consent.
+
+        Rule 1b — Ticket-size gate for downgrade offers:
             If recommended_strategy is ADAPTIVE_DOWNGRADE_OFFER but
-            event.amount < 500 INR, override to SECURE_PAYMENT_LINK.
+            event.amount < ₹500, override to SILENT_MANDATE_RETRY (BLOCKED_AMOUNT_LIMIT).
             Rationale: Downgrade economics don't work below this threshold.
 
-        Rule 2 — Max retries hard stop:
-            If workflow.retry_count >= MAX_RETRIES, force-transition to
-            ESCALATED_STOPPED regardless of agent recommendation.
+        Rule 2 — Max interventions hard stop:
+            If workflow.intervention_count >= 2, immediately force
+            ESCALATE_TO_HUMAN (BLOCKED_MAX_ATTEMPTS).
             Rationale: Prevents indefinite looping and customer harassment.
 
-        Rule 3 — Consent enforcement:
-            If the strategy requires customer consent (downgrade / mandate
-            migration), ensure requires_consent is explicitly True.
-            Rationale: Regulatory compliance — customer must authorise changes.
+        Rule 3 — Max retries hard stop (legacy):
+            If workflow.retry_count >= MAX_RETRIES, also force ESCALATE_TO_HUMAN.
+            Rationale: Backward compatibility with retry-based tracking.
 
         Args:
             decision: The AgentDecision produced by the recovery agent.
@@ -105,56 +110,94 @@ class GuardrailEngine:
 
         guardrail_notes: list[str] = []
 
-        # ── Rule 1: Ticket-size gate ─────────────────────────────────────────
+        # ── Rule 1a: Consent violation → SECURE_PAYMENT_LINK ─────────────────
+        # If a consent-required strategy is recommended WITHOUT explicit consent,
+        # block the strategy and redirect to SECURE_PAYMENT_LINK.
+        # Tag: BLOCKED_CONSENT_VIOLATION
+        strategy_str = getattr(strategy, "value", str(strategy))
+        consent_required_names = {s.value if hasattr(s, "value") else str(s) for s in _CONSENT_REQUIRED_STRATEGIES}
+        if strategy_str in consent_required_names and not consent:
+            original_consent_strat = strategy_str
+            strategy = RecoveryStrategy.SECURE_PAYMENT_LINK.value
+            strategy_str = strategy
+            reasoning = (
+                f"[GUARDRAIL OVERRIDE] Consent violation blocked: strategy '{original_consent_strat}' "
+                f"requires explicit customer consent but requires_consent=False was set by the agent. "
+                f"Strategy redirected to 'SECURE_PAYMENT_LINK' (BLOCKED_CONSENT_VIOLATION). "
+                f"Original agent reasoning: {decision.reasoning}"
+            )
+            consent = False
+            confidence = max(0.0, confidence - 0.1)
+            guardrail_notes.append("RULE1A_BLOCKED_CONSENT_VIOLATION")
+            logger.info(
+                "Guardrail Rule 1a triggered: consent violation for strategy '%s' on event %s. "
+                "Redirected to SECURE_PAYMENT_LINK.",
+                original_consent_strat,
+                event.id,
+            )
+
+        # ── Rule 1b: Ticket-size gate (ADAPTIVE_DOWNGRADE_OFFER < ₹500 → SILENT_MANDATE_RETRY) ──
         if (
-            strategy == RecoveryStrategy.ADAPTIVE_DOWNGRADE_OFFER
+            strategy_str == RecoveryStrategy.ADAPTIVE_DOWNGRADE_OFFER.value
             and event.amount < _DOWNGRADE_MIN_AMOUNT_INR
         ):
-            original = strategy.value
-            strategy = RecoveryStrategy.SECURE_PAYMENT_LINK
+            original = strategy_str
+            strategy = RecoveryStrategy.SILENT_MANDATE_RETRY.value
+            strategy_str = strategy
             reasoning = (
                 f"[GUARDRAIL OVERRIDE] Blocked by Policy: Ticket size too low for downgrade. "
-                f"Event amount ₹{event.amount:.2f} < threshold ₹{_DOWNGRADE_MIN_AMOUNT_INR:.2f}. "
+                f"Event amount \u20b9{event.amount:.2f} < threshold \u20b9{_DOWNGRADE_MIN_AMOUNT_INR:.2f}. "
                 f"Agent recommended '{original}' but strategy overridden to "
-                f"'{strategy.value}'. "
+                f"'{strategy}'. "
                 f"Original agent reasoning: {decision.reasoning}"
             )
             confidence = max(0.0, confidence - 0.2)  # Reduce confidence on override
-            guardrail_notes.append("RULE1_TICKET_SIZE_BLOCK")
+            consent = False  # SILENT_MANDATE_RETRY does not need consent
+            guardrail_notes.append("RULE1B_TICKET_SIZE_BLOCK")
             logger.info(
-                "Guardrail Rule 1 triggered: Downgrade blocked for event %s "
-                "(amount=%.2f). Overridden to SECURE_PAYMENT_LINK.",
+                "Guardrail Rule 1b triggered: Downgrade blocked for event %s "
+                "(amount=%.2f). Overridden to SILENT_MANDATE_RETRY.",
                 event.id,
                 event.amount,
             )
 
-        # ── Rule 2: Max retries hard stop ────────────────────────────────────
-        if workflow.retry_count >= MAX_RETRIES:
-            strategy = RecoveryStrategy.SECURE_PAYMENT_LINK  # marker — caller escalates
+        # ── Rule 2: Max intervention_count hard stop → ESCALATE_TO_HUMAN ─────
+        intervention_count = getattr(workflow, "intervention_count", 0)
+        if intervention_count >= 2:
+            strategy = RecoveryStrategy.ESCALATE_TO_HUMAN.value
             reasoning = (
-                f"[GUARDRAIL OVERRIDE] Max retries reached: workflow.retry_count="
-                f"{workflow.retry_count} >= MAX_RETRIES={MAX_RETRIES}. "
-                f"Forcing transition to ESCALATED_STOPPED. "
+                f"[GUARDRAIL OVERRIDE] Maximum interventions reached: workflow.intervention_count="
+                f"{intervention_count} >= 2. "
+                "Forcing ESCALATE_TO_HUMAN. Automated recovery exhausted; "
+                "escalating to human agent for manual follow-up. "
                 f"Original agent reasoning: {decision.reasoning}"
             )
             confidence = 1.0  # Deterministic rule — high certainty
             consent = False
-            guardrail_notes.append("RULE2_MAX_RETRIES_STOP")
+            guardrail_notes.append("RULE2_MAX_INTERVENTIONS_ESCALATE")
             logger.warning(
-                "Guardrail Rule 2 triggered: Max retries (%d) reached for event %s. "
-                "Workflow will be ESCALATED_STOPPED.",
-                MAX_RETRIES,
+                "Guardrail Rule 2 triggered: intervention_count=%d >= 2 for event %s. "
+                "Forcing ESCALATE_TO_HUMAN.",
+                intervention_count,
                 event.id,
             )
 
-        # ── Rule 3: Consent enforcement ──────────────────────────────────────
-        if strategy in _CONSENT_REQUIRED_STRATEGIES and not consent:
-            consent = True
-            guardrail_notes.append("RULE3_CONSENT_ENFORCED")
-            logger.info(
-                "Guardrail Rule 3 triggered: requires_consent set to True for "
-                "strategy '%s' on event %s.",
-                strategy.value,
+        # ── Rule 3: Max retries hard stop (legacy) → ESCALATE_TO_HUMAN ───────
+        if workflow.retry_count >= MAX_RETRIES:
+            strategy = RecoveryStrategy.ESCALATE_TO_HUMAN.value
+            reasoning = (
+                f"[GUARDRAIL OVERRIDE] Max retries reached: workflow.retry_count="
+                f"{workflow.retry_count} >= MAX_RETRIES={MAX_RETRIES}. "
+                "Forcing ESCALATE_TO_HUMAN. "
+                f"Original agent reasoning: {decision.reasoning}"
+            )
+            confidence = 1.0  # Deterministic rule — high certainty
+            consent = False
+            guardrail_notes.append("RULE3_MAX_RETRIES_ESCALATE")
+            logger.warning(
+                "Guardrail Rule 3 triggered: Max retries (%d) reached for event %s. "
+                "Forcing ESCALATE_TO_HUMAN.",
+                MAX_RETRIES,
                 event.id,
             )
 
@@ -170,12 +213,16 @@ class GuardrailEngine:
                 event.id,
             )
 
+        strat_literal = getattr(strategy, "value", str(strategy))
         return AgentDecision(
-            recommended_strategy=strategy,
+            recommended_strategy=strat_literal,  # type: ignore[arg-type]
             confidence_score=confidence,
             reasoning=reasoning,
             requires_consent=consent,
         )
+
+    # Alias for convenience
+    validate = validate_agent_decision
 
 
 # --------------------------------------------------------------------------- #

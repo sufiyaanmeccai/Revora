@@ -111,27 +111,36 @@ async def simulate_active_interventions(db: AsyncSession) -> Dict[str, int]:
         # ── 3. Roll the probability dice ──────────────────────────────────────
         roll = random.random()
         now  = datetime.now(timezone.utc)
+        wf_strat = getattr(workflow.strategy, "value", str(workflow.strategy))
 
         if roll < SUCCESS_PROBABILITY:
             # ── SUCCESS PATH (65%) ────────────────────────────────────────────
-            event.status              = PaymentStatus.RECOVERED
-            workflow.amount_recovered = event.amount
-            workflow.is_active        = False
-            workflow.resolved_at      = now
+            event.status  = PaymentStatus.RECOVERED
+            workflow.is_active   = False
+            workflow.resolved_at = now
+
+            # Phase 8B: ADAPTIVE_DOWNGRADE_OFFER captures 50% of original amount
+            # (the subscriber accepted a downgraded plan at half price).
+            # All other strategies capture the full original amount.
+            if wf_strat == "ADAPTIVE_DOWNGRADE_OFFER":
+                recovered_amount = round(event.amount * 0.5, 2)
+            else:
+                recovered_amount = event.amount
+            workflow.amount_recovered = recovered_amount
 
             audit = InterventionAuditLog(
                 id=str(uuid.uuid4()),
                 workflow_id=workflow.id,
                 payment_event_id=event.id,
                 executed_strategy="OUTCOME_SIMULATED_SUCCESS",
-                ai_recommended_strategy=workflow.strategy.value,
+                ai_recommended_strategy=wf_strat,
                 ai_confidence=1.0,
-                ai_reasoning=f"Simulated payment.captured webhook received for {workflow.strategy.value}.",
+                ai_reasoning=f"Simulated payment.captured webhook received for {wf_strat}.",
                 guardrail_decision="APPROVED",
                 reasoning=(
                     "Simulated payment.captured webhook received. "
-                    f"Customer responded to {workflow.strategy.value} outreach. "
-                    f"Amount captured: ₹{event.amount:.2f}. "
+                    f"Customer responded to {wf_strat} outreach. "
+                    f"Amount captured: \u20b9{recovered_amount:.2f}. "
                     "Event transitioned to RECOVERED."
                 ),
                 channel="SYSTEM",
@@ -139,8 +148,10 @@ async def simulate_active_interventions(db: AsyncSession) -> Dict[str, int]:
                     "simulation_roll":      round(roll, 4),
                     "success_probability":  SUCCESS_PROBABILITY,
                     "outcome":              "RECOVERED",
-                    "amount_recovered":     event.amount,
-                    "strategy":             workflow.strategy.value,
+                    "original_amount":      event.amount,
+                    "amount_recovered":     recovered_amount,
+                    "strategy":             wf_strat,
+                    "downgrade_applied":    (wf_strat == "ADAPTIVE_DOWNGRADE_OFFER"),
                     "retry_count_at_close": workflow.retry_count,
                 }),
                 timestamp=now,
@@ -149,10 +160,12 @@ async def simulate_active_interventions(db: AsyncSession) -> Dict[str, int]:
             counts["recovered"] += 1
 
             logger.info(
-                "Outcome simulator: event %s → RECOVERED (₹%.2f captured).",
+                "Outcome simulator: event %s → RECOVERED (₹%.2f captured, strategy=%s).",
                 event.id,
-                event.amount,
+                recovered_amount,
+                wf_strat,
             )
+
 
         else:
             # ── FAILURE / TIMEOUT PATH (35%) ──────────────────────────────────
@@ -169,7 +182,7 @@ async def simulate_active_interventions(db: AsyncSession) -> Dict[str, int]:
                     workflow_id=workflow.id,
                     payment_event_id=event.id,
                     executed_strategy="ESCALATED_STOPPED",
-                    ai_recommended_strategy=workflow.strategy.value,
+                    ai_recommended_strategy=wf_strat,
                     ai_confidence=1.0,
                     ai_reasoning=f"Recovery attempts exhausted ({workflow.retry_count}/{MAX_RETRIES}).",
                     guardrail_decision="APPROVED",
@@ -186,7 +199,7 @@ async def simulate_active_interventions(db: AsyncSession) -> Dict[str, int]:
                         "outcome":             "ESCALATED_STOPPED",
                         "retry_count":         workflow.retry_count,
                         "max_retries":         MAX_RETRIES,
-                        "strategy":            workflow.strategy.value,
+                        "strategy":            wf_strat,
                     }),
                     timestamp=now,
                 )
@@ -206,7 +219,7 @@ async def simulate_active_interventions(db: AsyncSession) -> Dict[str, int]:
                     workflow_id=workflow.id,
                     payment_event_id=event.id,
                     executed_strategy="OUTCOME_SIMULATED_FAILURE",
-                    ai_recommended_strategy=workflow.strategy.value,
+                    ai_recommended_strategy=wf_strat,
                     ai_confidence=1.0,
                     ai_reasoning=f"Simulated outreach timeout. retry_count now {workflow.retry_count}/{MAX_RETRIES}.",
                     guardrail_decision="APPROVED",
@@ -222,7 +235,7 @@ async def simulate_active_interventions(db: AsyncSession) -> Dict[str, int]:
                         "outcome":             "TIMEOUT_RETRY",
                         "retry_count":         workflow.retry_count,
                         "max_retries":         MAX_RETRIES,
-                        "strategy":            workflow.strategy.value,
+                        "strategy":            wf_strat,
                     }),
                     timestamp=now,
                 )

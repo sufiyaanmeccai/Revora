@@ -296,11 +296,12 @@ async def _run_engine(
 
     # ── 5. Recovery Agent → raw AgentDecision ────────────────────────────────
     raw_agent_decision: AgentDecision = await analyze_failure_context(event)
+    raw_strat_str = getattr(raw_agent_decision.recommended_strategy, "value", str(raw_agent_decision.recommended_strategy))
 
     logger.info(
         "Decision engine: Agent decision for '%s': strategy=%s confidence=%.2f",
         event_id,
-        raw_agent_decision.recommended_strategy.value,
+        raw_strat_str,
         raw_agent_decision.confidence_score,
     )
 
@@ -314,11 +315,12 @@ async def _run_engine(
         event,
         _WorkflowStub(),  # type: ignore[arg-type]
     )
+    validated_strat_str = getattr(validated_decision.recommended_strategy, "value", str(validated_decision.recommended_strategy))
 
     logger.info(
         "Decision engine: Guardrail-validated decision for '%s': strategy=%s",
         event_id,
-        validated_decision.recommended_strategy.value,
+        validated_strat_str,
     )
 
     # ── 7. Create RecoveryWorkflow ────────────────────────────────────────────
@@ -326,7 +328,7 @@ async def _run_engine(
         id=str(uuid.uuid4()),
         payment_event_id=event_id,
         diagnosed_cause=diagnosis.cause,
-        strategy=validated_decision.recommended_strategy,
+        strategy=RecoveryStrategy(validated_strat_str) if validated_strat_str in RecoveryStrategy._value2member_map_ else validated_strat_str,
         current_step=1,
         max_steps=diagnosis.max_steps,
         retry_count=0,
@@ -343,7 +345,7 @@ async def _run_engine(
     action_type: str
     channel: str
 
-    if strategy in (RecoveryStrategy.SECURE_PAYMENT_LINK, RecoveryStrategy.UPI_AUTOPAY_MIGRATION):
+    if strategy in (RecoveryStrategy.SECURE_PAYMENT_LINK, RecoveryStrategy.UPI_AUTOPAY_MIGRATION, "SECURE_PAYMENT_LINK", "UPI_AUTOPAY_MIGRATION"):
         link = await razorpay.generate_payment_link(
             amount=event.amount,
             customer_name=event.customer_name,
@@ -354,18 +356,21 @@ async def _run_engine(
         action_type     = "WHATSAPP_NUDGE_SENT"
         channel         = "WHATSAPP"
 
-    elif strategy == RecoveryStrategy.HINGLISH_VOICE_OUTREACH:
-        link = await razorpay.generate_payment_link(
-            amount=event.amount,
-            customer_name=event.customer_name,
-            customer_email=event.customer_email,
-            reference_id=event.id,
+    elif strategy in (RecoveryStrategy.ESCALATE_TO_HUMAN, "ESCALATE_TO_HUMAN"):
+        # Escalation — zero automated customer outreach; human agent assigned manually.
+        outreach_result = {"status": "escalated_to_human", "channel": "HUMAN"}
+        action_type     = "ESCALATED_TO_HUMAN"
+        channel         = "HUMAN"
+        # Immediately close the workflow and mark event as ESCALATED_STOPPED.
+        workflow.is_active   = False
+        workflow.resolved_at = datetime.now(timezone.utc)
+        event.status = PaymentStatus.ESCALATED_STOPPED
+        logger.info(
+            "Decision engine: PaymentEvent '%s' → ESCALATED_STOPPED (ESCALATE_TO_HUMAN guardrail).",
+            event_id,
         )
-        outreach_result = await outreach_service.trigger_hinglish_voice(event, link)
-        action_type     = "VOICE_CALL_TRIGGERED"
-        channel         = "VOICE"
 
-    elif strategy == RecoveryStrategy.ADAPTIVE_DOWNGRADE_OFFER:
+    elif strategy in (RecoveryStrategy.ADAPTIVE_DOWNGRADE_OFFER, "ADAPTIVE_DOWNGRADE_OFFER"):
         outreach_result = await outreach_service.execute_adaptive_downgrade(event)
         action_type     = "DOWNGRADE_OFFER_SENT"
         channel         = "EMAIL"
@@ -376,27 +381,28 @@ async def _run_engine(
         action_type     = "SILENT_RETRY_SCHEDULED"
         channel         = "SYSTEM"
 
-    # ── 9. Transition → INTERVENTION_ACTIVE ──────────────────────────────────
-    event.status = PaymentStatus.INTERVENTION_ACTIVE
-    logger.info(
-        "Decision engine: PaymentEvent '%s' → INTERVENTION_ACTIVE | action=%s",
-        event_id,
-        action_type,
-    )
+    # ── 9. Transition → INTERVENTION_ACTIVE (only for non-escalation strategies) ─
+    if event.status != PaymentStatus.ESCALATED_STOPPED:
+        event.status = PaymentStatus.INTERVENTION_ACTIVE
+        logger.info(
+            "Decision engine: PaymentEvent '%s' → INTERVENTION_ACTIVE | action=%s",
+            event_id,
+            action_type,
+        )
+
 
     # ── 10. Single comprehensive audit log (Phase 8A structured fields) ────────
-    guardrail_overridden = (
-        raw_agent_decision.recommended_strategy != validated_decision.recommended_strategy
-    )
+    guardrail_overridden = (raw_strat_str != validated_strat_str)
     guardrail_decision_str = "OVERRIDDEN" if guardrail_overridden else "APPROVED"
 
+    workflow_strat_str = getattr(workflow.strategy, "value", str(workflow.strategy))
     audit_metadata = {
         # Workflow context
-        "diagnosed_cause":          diagnosis.cause.value,
-        "workflow_strategy":        workflow.strategy.value,
+        "diagnosed_cause":          diagnosis.cause.value if hasattr(diagnosis.cause, "value") else str(diagnosis.cause),
+        "workflow_strategy":        workflow_strat_str,
         "max_steps":                diagnosis.max_steps,
         # Guardrail layer (summary in metadata for JSON consumers)
-        "guardrail_validated_strategy": validated_decision.recommended_strategy.value,
+        "guardrail_validated_strategy": validated_strat_str,
         "guardrail_overridden":         guardrail_overridden,
         "guardrail_requires_consent":   validated_decision.requires_consent,
         # Agent consent flag
@@ -414,7 +420,7 @@ async def _run_engine(
         payment_event_id=event_id,
         # Phase 8A: renamed field + structured AI columns
         executed_strategy="INTERVENTION_DISPATCHED",
-        ai_recommended_strategy=raw_agent_decision.recommended_strategy.value,
+        ai_recommended_strategy=raw_strat_str,
         ai_confidence=raw_agent_decision.confidence_score,
         ai_reasoning=raw_agent_decision.reasoning,
         guardrail_decision=guardrail_decision_str,

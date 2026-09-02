@@ -25,11 +25,20 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from typing import Any, Dict, Generic, List, Optional, TypeVar
+from typing import Any, Dict, Generic, List, Literal, Optional, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.models.orm import DiagnosedCause, PaymentStatus, RecoveryStrategy
+
+# Literal types for Recovery Strategies (Phase 8B)
+RecoveryStrategyLiteral = Literal[
+    "SILENT_MANDATE_RETRY",
+    "SECURE_PAYMENT_LINK",
+    "UPI_AUTOPAY_MIGRATION",
+    "ADAPTIVE_DOWNGRADE_OFFER",
+    "ESCALATE_TO_HUMAN",
+]
 
 # --------------------------------------------------------------------------- #
 # Generic envelope (Phase 0 — preserved)                                       #
@@ -55,19 +64,19 @@ class ErrorDetail(BaseModel):
 
 
 # --------------------------------------------------------------------------- #
-# Phase 7: AI Agent Decision schema                                            #
+# Phase 7 & 8B: AI Agent Decision schema                                      #
 # --------------------------------------------------------------------------- #
 
 class AgentDecision(BaseModel):
     """
-    Structured output produced by the Recovery Agent (Phase 7).
+    Structured output produced by the Recovery Agent.
 
-    Mirrors what an LLM structured-output framework (Instructor / LangChain)
-    would yield when analysing a failed PaymentEvent. The GuardrailEngine
+    Mirrors what an LLM structured-output framework (Google GenAI / Instructor)
+    yields when analysing a failed PaymentEvent. The GuardrailEngine
     validates and may override this decision before it is executed.
 
     Fields:
-        recommended_strategy: The strategy the agent recommends.
+        recommended_strategy: The strategy the agent recommends (Literal type).
         confidence_score:     Agent confidence in the recommendation (0.0–1.0).
         reasoning:            Human-readable explanation of the agent's logic.
         requires_consent:     True if the strategy requires explicit customer
@@ -75,7 +84,7 @@ class AgentDecision(BaseModel):
                               mandate migrations).
     """
 
-    recommended_strategy: RecoveryStrategy
+    recommended_strategy: RecoveryStrategyLiteral
     confidence_score: float = Field(
         ge=0.0,
         le=1.0,
