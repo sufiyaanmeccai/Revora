@@ -59,13 +59,18 @@ Revora ingests real-time Razorpay payment lifecycle webhooks with cryptographica
             └─────────────────────────────┼──────────────────────────────┘
                                           ▼
                        ┌──────────────────────────────────────┐
-                       │    Immutable Recovery Audit Trail    │
-                       │   (RecoveryAuditLog + SQLite Async)  │
+                       │    Append-Only Audit Trail Ledger    │
+                       │ (InterventionAuditLog + Async SQLite)│
                        └──────────────────┬───────────────────┘
                                           ▼
                        ┌──────────────────────────────────────┐
                        │   Real-Time Operations Dashboard     │
                        │      GET /api/v1/metrics (Web UI)    │
+                       └──────────────────┬───────────────────┘
+                                          ▼
+                       ┌──────────────────────────────────────┐
+                       │   Closed-Loop Webhook Reconciliation │
+                       │    (payment_link.paid / captured)    │
                        └──────────────────────────────────────┘
 ```
 
@@ -73,18 +78,18 @@ Revora ingests real-time Razorpay payment lifecycle webhooks with cryptographica
 - **FastAPI Core & Async SQLite:** High-concurrency event ingestion pipeline with non-blocking I/O using SQLAlchemy 2.0 and `aiosqlite`.
 - **Constant-Time Cryptographic Verification:** Webhook security using `hmac.compare_digest` protecting against timing attacks.
 - **Self-Contained Background Tasks:** The decision engine and outreach services execute in isolated sessions via `FastAPI.BackgroundTasks`, acknowledging Razorpay webhooks in `< 15ms`.
-- **Immutable Compliance Ledger:** Every diagnosis, state transition, and customer outreach is recorded in `RecoveryAuditLog` with serialized metadata for full auditability.
+- **Append-Only Compliance Ledger:** Every diagnosis, state transition, and customer outreach is recorded in `InterventionAuditLog` with serialized metadata for full auditability.
 
 ---
 
-## 🖥️ Live Operations Dashboard
+## 🖥️ Live Operations Dashboard & Demo Studio
 
 Revora includes a built-in, Razorpay-caliber dark-mode command center served directly by the FastAPI engine at `http://localhost:8000/`.
 
 - **Real-Time KPI Cards:** Revenue at Risk, Failed Events, In-Recovery Pipeline, and Recovered Revenue.
 - **Root-Cause Breakdown:** Live distribution of diagnosed failure reasons.
 - **Strategy Routing Analytics:** Real-time breakdown of executed recovery strategies.
-- **One-Click Batch Simulation:** Trigger synthetic batches of 50+ diverse transaction failures with realistic Indian profiles and watch the decision engine route them live.
+- **Track 03 Scenario Studio:** 4 deterministic one-click scenario runners demonstrating adaptive downselling, micro-transaction guardrails, escalation limits, and Gemini outage resilience.
 
 ---
 
@@ -114,11 +119,17 @@ pip install -r requirements.txt
 ### 2. Configure Environment Variables
 ```bash
 cp .env.example .env
-# Default development values in .env work out-of-the-box with SQLite!
+
+# Optional: Add Razorpay Test Mode credentials to generate live Testnet payment links:
+# RAZORPAY_KEY_ID=rzp_test_...
+# RAZORPAY_KEY_SECRET=...
+# RAZORPAY_WEBHOOK_SECRET=...
+# GEMINI_API_KEY=...
+# (Default development values work 100% out-of-the-box with offline mocks!)
 ```
 
 ### 3. Run the Test Suite
-Revora is backed by a comprehensive suite of **48 automated unit and integration tests**:
+Revora is backed by a comprehensive suite of **101 automated unit and integration tests**:
 ```bash
 pytest app/tests/ -v
 ```
@@ -133,104 +144,22 @@ uvicorn app.main:app --reload --port 8000
 
 ---
 
-## 🧪 Testing the Recovery Flow via API
-
-### Trigger a Synthetic Batch Simulation
-```bash
-curl -X POST "http://localhost:8000/api/v1/simulation/run?count=50"
-```
-
-### Ingest a Razorpay Webhook Manually
-```bash
-curl -X POST "http://localhost:8000/api/v1/webhooks/razorpay" \
-  -H "Content-Type: application/json" \
-  -H "X-Razorpay-Signature: <your_hmac_signature>" \
-  -d '{
-    "event": "payment.failed",
-    "payload": {
-      "payment": {
-        "entity": {
-          "id": "pay_TEST123456",
-          "amount": 29900,
-          "currency": "INR",
-          "email": "customer@example.com",
-          "contact": "+919876543210",
-          "error_code": "GATEWAY_ERROR",
-          "error_reason": "timeout"
-        }
-      }
-    }
-  }'
-```
-
-### Inspect Aggregated Metrics
-```bash
-curl -X GET "http://localhost:8000/api/v1/metrics"
-```
-
----
-
-## 📂 Project Directory Structure
-
-```
-Revora/
-├── app/
-│   ├── main.py                      # FastAPI app entry-point & UI mounting
-│   ├── core/
-│   │   ├── config.py                # Pydantic-settings config
-│   │   ├── database.py              # Async SQLAlchemy engine & sessionmaker
-│   │   └── security.py              # HMAC-SHA256 signature verification
-│   ├── api/v1/
-│   │   ├── api.py                   # Aggregated v1 API router
-│   │   └── endpoints/
-│   │       ├── health.py            # GET /health
-│   │       ├── webhooks.py          # POST /webhooks/razorpay
-│   │       ├── recovery.py          # GET /recovery/status
-│   │       ├── simulation.py        # POST /simulation/run
-│   │       └── metrics.py           # GET /metrics
-│   ├── models/
-│   │   ├── orm.py                   # SQLAlchemy Base, PaymentEvent, RecoveryWorkflow, RecoveryAuditLog
-│   │   └── schemas.py               # Pydantic v2 domain schemas & RecoverySummaryStats
-│   ├── services/
-│   │   ├── decision_engine.py       # Deterministic diagnosis & strategy decision engine
-│   │   ├── outreach.py              # WhatsApp, Hinglish voice, and downsell executors
-│   │   ├── razorpay_client.py       # Razorpay API client & payment link generator stub
-│   │   ├── simulation.py            # Synthetic batch generator (weighted error profiles)
-│   │   └── metrics.py               # Async aggregations across statuses & workflows
-│   ├── static/
-│   │   └── index.html               # Razorpay-standard dark-mode operations dashboard
-│   └── tests/
-│       ├── test_health.py           # Endpoint health checks
-│       ├── test_database.py         # Async ORM models & relationships
-│       ├── test_webhooks.py         # HMAC verification & event ingestion
-│       ├── test_decision_engine.py  # Diagnosis routing & 2-tier audit trail
-│       ├── test_outreach.py         # WhatsApp, Hinglish voice script & downsell tests
-│       └── test_simulation_metrics.py# Batch runner & metrics aggregation tests
-├── requirements.txt
-├── pytest.ini
-├── .env.example
-└── README.md
-```
-
----
-
----
-
 ## 🔍 Technical Honesty: Real vs. Simulated Architecture
 
 To maintain complete transparency for hackathon evaluation:
 
 | Component | Status | Details |
 |:---|:---|:---|
+| **Razorpay Payment Link API** | **REAL (Test Mode) / MOCK FALLBACK** | Integrates official `razorpay` Python SDK to generate live Test Mode links (`https://rzp.io/i/...`) for `SECURE_PAYMENT_LINK` and `ADAPTIVE_DOWNGRADE_OFFER` when `RAZORPAY_KEY_ID` & `RAZORPAY_KEY_SECRET` exist. Falls back safely to deterministic mock links on missing keys or timeouts. |
 | **Webhook Ingestion** | **REAL** | Verifies HMAC-SHA256 signatures with `hmac.compare_digest`, enforces DB-level unique constraint on `x-razorpay-event-id` for deduplication, and processes `payment.failed`, `payment_link.paid`, `payment.captured`, and `subscription.halted`. |
 | **AI Recovery Agent (Gemini)** | **REAL** | Official `google-genai` SDK with strict Pydantic structured output (`AgentDecision`), multi-attempt prompt context, and automatic offline `[FALLBACK]` resilience when API key is unset or network fails. |
 | **Policy Guardrail Engine** | **REAL** | Strict deterministic Python rule engine acting as final authority: enforces customer consent (Rule 1a), overrides low-ticket downgrades < ₹500 (Rule 1b), caps automated attempts at 2 (Rule 2), and enforces max retries (Rule 3). |
-| **Unified Reconciliation** | **REAL** | Matches non-PII identifiers, calculates exact 50% downgrade accounting vs 100% full recovery, handles late-arrivals/idempotency, and writes immutable `InterventionAuditLog` entries. |
+| **Unified Reconciliation** | **REAL** | Matches non-PII identifiers (`reference_id = PaymentEvent.id`), calculates exact 50% downgrade accounting vs 100% full recovery, handles late-arrivals/idempotency, and writes append-only `InterventionAuditLog` entries. |
 | **Database & Accounting Layer** | **REAL** | Fully async SQLAlchemy 2.0 ORM with SQLite backend (`PaymentEvent`, `RecoveryWorkflow`, `InterventionAuditLog`). |
 | **Operations UI & Scenario Studio** | **REAL** | Interactive dark-mode dashboard and live Scenario Studio served directly by FastAPI. |
+| **Demo Studio Scenarios** | **SIMULATED / ISOLATED** | Uses `is_simulated=True` to run completely deterministic offline evaluations during judging without external API dependencies. |
 | **Outbound WhatsApp/Voice Gateway** | **MOCKED** | Generates fully formatted WhatsApp payloads and Hinglish voice call scripts without sending live SMS/carrier calls. |
 | **Customer Payment Action** | **SIMULATED** | Fast-Forward and Demo Studio simulate customer click-through and payment completion to demonstrate closed-loop reconciliation. |
-| **Razorpay Payment Link API** | **MOCKED / STUB** | Generates deterministic Razorpay link URLs (`https://rzp.io/i/mock_<ref_id>`) without live merchant billing credentials. |
 
 ---
 
@@ -255,7 +184,7 @@ The dashboard and API (`/api/v1/demo/scenarios`) include 4 deterministic scenari
 
 ## 🧪 Running the Test Suite
 
-Revora is validated with **95 automated async pytest tests** covering 100% of the core recovery lifecycle:
+Revora is validated with **101 automated async pytest tests** covering 100% of the core recovery lifecycle with zero live network dependencies:
 
 ```bash
 .\venv\Scripts\pytest.exe app/tests/ -v

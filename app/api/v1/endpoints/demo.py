@@ -147,7 +147,7 @@ async def run_scenario_1(db: AsyncSession = Depends(get_db)) -> Dict[str, Any]:
         "app.services.decision_engine.analyze_failure_context",
         new=AsyncMock(return_value=mock_decision),
     ):
-        await _run_engine(db, event.id)
+        await _run_engine(db, event.id, is_simulated=True)
 
     # Simulate customer accepting the 50% downsell offer
     recon_result = await reconcile_payment_success(
@@ -237,7 +237,7 @@ async def run_scenario_2(db: AsyncSession = Depends(get_db)) -> Dict[str, Any]:
         "app.services.decision_engine.analyze_failure_context",
         new=AsyncMock(return_value=mock_decision),
     ):
-        await _run_engine(db, event.id)
+        await _run_engine(db, event.id, is_simulated=True)
 
     # Fetch audit logs
     audit_res = await db.execute(
@@ -320,7 +320,7 @@ async def run_scenario_3(db: AsyncSession = Depends(get_db)) -> Dict[str, Any]:
         "app.services.decision_engine.analyze_failure_context",
         new=AsyncMock(return_value=mock_decision_1),
     ):
-        await _run_engine(db, event.id)
+        await _run_engine(db, event.id, is_simulated=True)
 
     # Re-fetch event and simulate Attempt 1 timeout -> trigger Attempt 2
     event.status = PaymentStatus.DIAGNOSED
@@ -344,7 +344,7 @@ async def run_scenario_3(db: AsyncSession = Depends(get_db)) -> Dict[str, Any]:
         "app.services.decision_engine.analyze_failure_context",
         new=AsyncMock(return_value=mock_decision_2),
     ):
-        await _run_engine(db, event.id)
+        await _run_engine(db, event.id, is_simulated=True)
 
     # Fetch audit logs
     audit_res = await db.execute(
@@ -426,7 +426,7 @@ async def run_scenario_4(db: AsyncSession = Depends(get_db)) -> Dict[str, Any]:
         "app.services.decision_engine.analyze_failure_context",
         new=AsyncMock(return_value=fallback_decision),
     ):
-        await _run_engine(db, event.id)
+        await _run_engine(db, event.id, is_simulated=True)
 
     # Fetch audit logs
     audit_res = await db.execute(

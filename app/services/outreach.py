@@ -145,6 +145,7 @@ class OutreachService:
     async def execute_adaptive_downgrade(
         self,
         event: PaymentEvent,
+        payment_link: str | None = None,
     ) -> Dict[str, Any]:
         """
         Generate and dispatch an adaptive plan downgrade offer to the customer.
@@ -155,6 +156,7 @@ class OutreachService:
 
         Args:
             event: The failed ``PaymentEvent`` ORM record.
+            payment_link: Pre-generated Razorpay downgrade payment link (optional).
 
         Returns:
             Structured dispatch result dict (stored in audit metadata_json).
@@ -163,19 +165,22 @@ class OutreachService:
 
         logger.info(
             "OutreachService.execute_adaptive_downgrade | "
-            "customer=%r | original=%.2f INR | offer=%.2f INR",
+            "customer=%r | original=%.2f INR | offer=%.2f INR | link=%s",
             event.customer_email,
             event.amount,
             new_amount,
+            payment_link,
         )
 
         # ── Stub: simulate a downgrade offer email dispatch ──────────────────
         return {
-            "status":         "downgrade_offer_sent",
-            "channel":        "email",
-            "recipient":      event.customer_email,
+            "status":          "downgrade_offer_sent",
+            "channel":         "email",
+            "recipient":       event.customer_email,
             "original_amount": event.amount,
-            "new_amount":     new_amount,
-            "currency":       event.currency,
-            "timestamp":      datetime.now(timezone.utc).isoformat(),
+            "new_amount":      new_amount,
+            "currency":        event.currency,
+            "payment_link":    payment_link,
+            "timestamp":       datetime.now(timezone.utc).isoformat(),
         }
+

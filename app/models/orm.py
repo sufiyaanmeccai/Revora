@@ -6,7 +6,7 @@ SQLAlchemy 2.x ORM models for the Revora Revenue Recovery Engine.
 Models:
   • PaymentEvent          — captures a failed payment with full customer context.
   • RecoveryWorkflow      — orchestrates an AI-driven recovery strategy for an event.
-  • InterventionAuditLog  — immutable, structured audit trail of every recovery action.
+  • InterventionAuditLog  — append-only, structured audit trail of every recovery action.
 
 All models share a common declarative Base and include:
   • id          — UUID string primary key (generated at Python level).
@@ -278,7 +278,7 @@ class RecoveryWorkflow(Base):
 
 class InterventionAuditLog(Base):
     """
-    Immutable, structured audit record for every action taken by the recovery engine.
+    Append-only, structured audit record for every action taken by the recovery engine.
 
     Phase 8A changes vs RecoveryAuditLog:
       • Table renamed from ``recovery_audit_logs`` → ``intervention_audit_log``.

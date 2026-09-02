@@ -210,9 +210,10 @@ async def process_payment_event(
     event_id: str,
     _session_factory: Optional[Callable[[], async_sessionmaker]] = None,
     _outreach_service: Optional[OutreachService] = None,
+    is_simulated: bool = False,
 ) -> None:
     """
-    Run the Phase 7 decision engine for a given PaymentEvent ID.
+    Run the Phase 7/9 decision engine for a given PaymentEvent ID.
 
     This function is designed to run as a FastAPI ``BackgroundTask``.
     It creates and manages its own database session so it is completely
@@ -222,6 +223,7 @@ async def process_payment_event(
         event_id:          Primary key of the ``PaymentEvent`` to process.
         _session_factory:  Optional override for the session factory (tests).
         _outreach_service: Optional override for OutreachService (tests).
+        is_simulated:      If True, forces deterministic mock payment links.
     """
     if _session_factory is None:
         from app.core.database import AsyncSessionLocal as _session_factory  # type: ignore[assignment]
@@ -230,25 +232,26 @@ async def process_payment_event(
         _outreach_service = OutreachService()
 
     async with _session_factory() as db:  # type: ignore[operator]
-        await _run_engine(db, event_id, _outreach_service)
+        await _run_engine(db, event_id, _outreach_service, is_simulated=is_simulated)
 
 
 async def _run_engine(
     db: AsyncSession,
     event_id: str,
     outreach_service: Optional[OutreachService] = None,
+    is_simulated: bool = False,
 ) -> None:
     """
-    Phase 7 engine logic operating inside an existing AsyncSession.
+    Phase 7/9 engine logic operating inside an existing AsyncSession.
 
     Pipeline:
       1. Idempotency check (RECOVERED / ESCALATED_STOPPED → skip)
       2. Transition → DIAGNOSED
-      3. Recovery Agent → AgentDecision (simulated LLM structured output)
+      3. Recovery Agent → AgentDecision (LLM structured output / heuristic fallback)
       4. GuardrailEngine.validate_agent_decision() → validated AgentDecision
       5. Create RecoveryWorkflow
-      6. Execute outreach → transition to INTERVENTION_ACTIVE
-      7. Write single comprehensive RecoveryAuditLog
+      6. Execute outreach (Testnet Razorpay link or mock) → transition to INTERVENTION_ACTIVE
+      7. Write single comprehensive InterventionAuditLog
       8. Commit atomically
     """
     if outreach_service is None:
@@ -368,20 +371,23 @@ async def _run_engine(
     # Flush so workflow.id is available for the audit log FK
     await db.flush()
 
-    # ── 8. Execute outreach strategy ──────────────────────────────────────────
+    # ── 8. Execute outreach strategy (Phase 9 Testnet / Mock Link) ────────────
     strategy = validated_decision.recommended_strategy
     outreach_result: Dict[str, Any]
     action_type: str
     channel: str
 
     if strategy in (RecoveryStrategy.SECURE_PAYMENT_LINK, RecoveryStrategy.UPI_AUTOPAY_MIGRATION, "SECURE_PAYMENT_LINK", "UPI_AUTOPAY_MIGRATION"):
-        link = await razorpay.generate_payment_link(
+        link_info = await razorpay.create_payment_link(
+            event=event,
             amount=event.amount,
-            customer_name=event.customer_name,
-            customer_email=event.customer_email,
-            reference_id=event.id,
+            description="Payment Recovery - Plan Invoice",
+            is_simulated=is_simulated,
         )
+        link = link_info["short_url"]
         outreach_result = await outreach_service.send_whatsapp_recovery(event, link)
+        outreach_result["payment_link_id"] = link_info.get("payment_link_id")
+        outreach_result["is_mock"] = link_info.get("is_mock", True)
         action_type     = "WHATSAPP_NUDGE_SENT"
         channel         = "WHATSAPP"
 
@@ -400,7 +406,17 @@ async def _run_engine(
         )
 
     elif strategy in (RecoveryStrategy.ADAPTIVE_DOWNGRADE_OFFER, "ADAPTIVE_DOWNGRADE_OFFER"):
-        outreach_result = await outreach_service.execute_adaptive_downgrade(event)
+        target_amount = round(event.amount / 2, 2)
+        link_info = await razorpay.create_payment_link(
+            event=event,
+            amount=target_amount,
+            description="Adaptive Downsell - 50% Plan Invoice",
+            is_simulated=is_simulated,
+        )
+        link = link_info["short_url"]
+        outreach_result = await outreach_service.execute_adaptive_downgrade(event, payment_link=link)
+        outreach_result["payment_link_id"] = link_info.get("payment_link_id")
+        outreach_result["is_mock"] = link_info.get("is_mock", True)
         action_type     = "DOWNGRADE_OFFER_SENT"
         channel         = "EMAIL"
 
@@ -418,7 +434,6 @@ async def _run_engine(
             event_id,
             action_type,
         )
-
 
     # ── 10. Single comprehensive audit log (Phase 8A structured fields) ────────
     guardrail_overridden = (raw_strat_str != validated_strat_str)
@@ -440,6 +455,9 @@ async def _run_engine(
         "outreach_action":  action_type,
         "outreach_channel": channel,
         "outreach_status":  outreach_result.get("status"),
+        "payment_link_id":  outreach_result.get("payment_link_id"),
+        "payment_link_url": outreach_result.get("payment_link"),
+        "is_mock_link":     outreach_result.get("is_mock", True),
         "outreach_result":  outreach_result,
     }
 
@@ -475,3 +493,4 @@ async def _run_engine(
         action_type,
         audit_metadata["guardrail_overridden"],
     )
+

@@ -17,7 +17,7 @@ Closes the autonomous recovery loop by:
        captures 100% of the invoice amount (or amount_paid).
   4. Closing the workflow (is_active=False, resolved_at=now, amount_recovered=...) and
      transitioning PaymentEvent.status = PaymentStatus.RECOVERED.
-  5. Writing an immutable InterventionAuditLog entry with executed_strategy="PAYMENT_SUCCESS_RECONCILED".
+  5. Writing an append-only InterventionAuditLog entry with executed_strategy="PAYMENT_SUCCESS_RECONCILED".
 
 Both the live Razorpay webhook handler and the Outcome Simulator call this unified
 service to eliminate parallel accounting logic.
@@ -211,7 +211,7 @@ async def _execute_reconciliation(
         workflow.is_active = False
         workflow.resolved_at = now
 
-    # ── 6. Immutable Audit Log ────────────────────────────────────────────────
+    # ── 6. Append-Only Audit Log ──────────────────────────────────────────────
     audit_metadata = {
         "reconciliation_source": source,
         "payment_identifier": clean_id,

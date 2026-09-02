@@ -791,15 +791,21 @@
         // Render audit trail snippets
         const auditContainer = document.getElementById('resAuditLogs');
         if (data.audit_trail && data.audit_trail.length > 0) {
-          auditContainer.innerHTML = data.audit_trail.map(log => `
+          auditContainer.innerHTML = data.audit_trail.map(log => {
+            const hasLink = log.payment_link_url || (log.reasoning && log.reasoning.includes('link'));
+            const isReal = log.payment_link_url && !log.payment_link_url.includes('mock');
+            const linkTag = hasLink 
+              ? `<span class="ml-1.5 px-1.5 py-0.5 text-[9px] font-mono rounded ${isReal ? 'bg-brand-success/20 text-brand-success border border-brand-success/30' : 'bg-brand-warning/20 text-brand-warning border border-brand-warning/30'}">${isReal ? '[Real Testnet Link]' : '[Simulated Link]'}</span>`
+              : '';
+            return `
             <div class="border-b border-brand-border/40 pb-1.5 last:border-b-0">
               <div class="flex items-center justify-between text-brand-textMuted">
-                <span class="text-brand-accent font-semibold">${log.strategy}</span>
+                <span class="text-brand-accent font-semibold">${log.strategy} ${linkTag}</span>
                 <span>${log.channel} · ${log.guardrail_decision}</span>
               </div>
               <div class="text-[10px] text-brand-textLight mt-0.5">${log.reasoning || 'No details'}</div>
             </div>
-          `).join('');
+          `}).join('');
         } else {
           auditContainer.innerHTML = `<div>Event ID: ${data.event_id} | Initial Amount: ${formatINR(data.original_amount)}</div>`;
         }
