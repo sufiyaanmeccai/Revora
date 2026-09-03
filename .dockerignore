@@ -1,0 +1,28 @@
+# Git & local VCS
+.git
+.gitignore
+
+# Python virtual environment & bytecode
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# SQLite local databases
+*.sqlite
+*.sqlite3
+*.db
+revora.db
+
+# Test & coverage artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local IDE metadata
+.vscode/
+.idea/
+.gemini/
+*.log

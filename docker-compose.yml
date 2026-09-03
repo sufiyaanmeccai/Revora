@@ -1,0 +1,20 @@
+# ⚡ REVORA — Docker Compose Setup
+# Standalone, zero-external-dependency configuration for evaluation & judging
+
+services:
+  revora:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: revora-engine
+    ports:
+      - "8000:8000"
+    environment:
+      - APP_ENV=production
+      - PORT=8000
+      # Optional live credentials (offline deterministic mocks work by default out-of-the-box!)
+      - RAZORPAY_KEY_ID=${RAZORPAY_KEY_ID:-}
+      - RAZORPAY_KEY_SECRET=${RAZORPAY_KEY_SECRET:-}
+      - RAZORPAY_WEBHOOK_SECRET=${RAZORPAY_WEBHOOK_SECRET:-revora_webhook_secret_demo}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+    restart: unless-stopped

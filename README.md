@@ -31,7 +31,7 @@ Revora ingests real-time Razorpay payment lifecycle webhooks with cryptographica
 
 ---
 
-## 💡 Customer Value & Unit Economics Intelligence (Phase 10)
+## 💡 Customer Value & Unit Economics Intelligence
 
 Revora calculates **Net Recovery Value** across every potential intervention to guarantee economically sound autonomous recovery:
 
@@ -88,17 +88,19 @@ The `GuardrailEngine` evaluates business, regulatory, and economic rules in stri
                        ┌──────────────────────────────────────┐
                        │    Append-Only Audit Trail Ledger    │
                        │ (InterventionAuditLog + Async SQLite)│
-                       └──────────────────┬───────────────────┘
-                                          ▼
-                       ┌──────────────────────────────────────┐
-                       │   Real-Time Operations Dashboard     │
-                       │      GET /api/v1/metrics (Web UI)    │
-                       └──────────────────┬───────────────────┘
-                                          ▼
-                       ┌──────────────────────────────────────┐
-                       │   Closed-Loop Webhook Reconciliation │
-                       │    (payment_link.paid / captured)    │
-                       └──────────────────────────────────────┘
+                       └──────┬───────────────────┬───────────┘
+                              │                   │
+                              ▼                   ▼
+           ┌────────────────────────────┐    ┌────────────────────────────┐
+           │ Real-Time Ops Dashboard    │    │ Full Audit Trail Export    │
+           │ GET /api/v1/metrics (Web UI)│   │ GET /api/v1/audit/export   │
+           └────────────────────────────┘    └────────────────────────────┘
+                              │
+                              ▼
+           ┌──────────────────────────────────────┐
+           │   Closed-Loop Webhook Reconciliation │
+           │    (payment_link.paid / captured)    │
+           └──────────────────────────────────────┘
 ```
 
 ---
@@ -112,16 +114,15 @@ Revora includes a built-in dark-mode command center served directly by FastAPI a
 - **Strategy Routing Analytics:** Real-time breakdown of executed recovery strategies.
 - **Customer Value & Economic Drawer:** Live inspection of simulated customer tiers, intervention costs, and net recovery values.
 - **Track 03 Scenario Studio:** 7 deterministic one-click scenario runners.
+- **Audit Export:** One-click CSV download of the complete append-only audit trail.
 
 ---
 
 ## 🚀 Quick Start & Local Setup
 
-### Prerequisites
-- Python 3.11+
-- Virtualenv
+### Option A: Local Python Setup (Recommended for Dev)
 
-### 1. Clone & Set Up Environment
+#### 1. Clone & Set Up Virtual Environment
 ```bash
 git clone https://github.com/sufiyaanmeccai/Revora.git
 cd Revora
@@ -134,11 +135,11 @@ venv\Scripts\activate
 # macOS / Linux:
 # source venv/bin/activate
 
-# Install dependencies
+# Install pinned dependencies
 pip install -r requirements.txt
 ```
 
-### 2. Configure Environment Variables
+#### 2. Configure Environment Variables
 ```bash
 cp .env.example .env
 
@@ -150,19 +151,54 @@ cp .env.example .env
 # (Default development values work 100% out-of-the-box with offline mocks!)
 ```
 
-### 3. Run the Test Suite
-Revora is backed by **108 automated unit and integration tests**:
+#### 3. Run the Test Suite
 ```bash
 pytest app/tests/ -v
 ```
 
-### 4. Start the Application Server
+#### 4. Start the Application Server
 ```bash
 uvicorn app.main:app --reload --port 8000
 ```
 
 - **Operations Dashboard:** Open [http://localhost:8000/](http://localhost:8000/) in your browser.
 - **Interactive API Docs:** Explore OpenAPI at [http://localhost:8000/docs](http://localhost:8000/docs).
+- **Audit CSV Export:** Download directly at [http://localhost:8000/api/v1/audit/export](http://localhost:8000/api/v1/audit/export).
+
+---
+
+### Option B: Docker Container Setup (Reproducible Judge Evaluation)
+
+Revora is fully containerized with zero external service dependencies (pure standalone SQLite + FastAPI):
+
+#### 1. Build and Run with Docker
+```bash
+# Build the lightweight container
+docker build -t revora-engine .
+
+# Run container exposing port 8000
+docker run -p 8000:8000 \
+  -e RAZORPAY_KEY_ID="rzp_test_..." \
+  -e RAZORPAY_KEY_SECRET="..." \
+  -e GEMINI_API_KEY="..." \
+  revora-engine
+```
+
+#### 2. Or Launch with Docker Compose
+```bash
+docker compose up --build
+```
+Access the dashboard at `http://localhost:8000/`.
+
+---
+
+## 📊 Auditability & CSV Export
+
+For compliance and evaluation inspection, Revora provides a dedicated endpoint:
+- **`GET /api/v1/audit/export`**
+  - Streams a clean, deterministic CSV file of the `InterventionAuditLog` table.
+  - Columns: `id`, `timestamp`, `workflow_id`, `payment_event_id`, `executed_strategy`, `ai_recommended_strategy`, `ai_confidence`, `guardrail_decision`, `channel`, `intervention_cost`, `net_recovery_value`, `reasoning`.
+  - Guaranteed zero-PII and zero-secret leakage.
 
 ---
 
@@ -175,6 +211,7 @@ uvicorn app.main:app --reload --port 8000
 | **AI Recovery Agent (Gemini)** | **REAL** | Official `google-genai` SDK with strict Pydantic structured output (`AgentDecision`), simulated customer context & economic guidance, and automatic offline `[FALLBACK]` resilience when API key is unset or network fails. |
 | **Policy Guardrail Engine** | **REAL** | Strict deterministic Python rule engine acting as final authority: enforces customer consent (Priority 1), ₹500 floor (Priority 2), Net Recovery Value viability (Priority 3), and anti-harassment attempt caps (Priority 4). |
 | **Unified Reconciliation** | **REAL** | Matches non-PII identifiers (`reference_id = PaymentEvent.id`), calculates exact 50% downgrade accounting vs 100% full recovery, handles late-arrivals/idempotency, and writes append-only `InterventionAuditLog` entries. |
+| **Audit Trail CSV Export** | **REAL** | Streams full append-only audit trail via `GET /api/v1/audit/export` without customer PII or credentials. |
 | **Database & Accounting Layer** | **REAL** | Fully async SQLAlchemy 2.0 ORM with SQLite backend (`PaymentEvent`, `RecoveryWorkflow`, `InterventionAuditLog`). |
 | **Operations UI & Scenario Studio** | **REAL** | Interactive dark-mode dashboard and live Scenario Studio served directly by FastAPI. |
 | **Demo Studio Scenarios** | **SIMULATED / ISOLATED** | Uses `is_simulated=True` to run completely deterministic offline evaluations during judging without external API dependencies. |
@@ -200,7 +237,7 @@ The dashboard and API (`/api/v1/demo/scenarios`) include 7 deterministic scenari
 
 ## 🧪 Running the Test Suite
 
-Revora is validated with **108 automated async pytest tests** covering 100% of the core recovery lifecycle with zero live network dependencies:
+Revora is validated with **116 automated async pytest tests** covering 100% of the core recovery lifecycle with zero live network dependencies:
 
 ```bash
 .\venv\Scripts\pytest.exe app/tests/ -v

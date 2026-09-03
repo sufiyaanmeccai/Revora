@@ -132,13 +132,20 @@
       </div>
 
       <!-- Action Buttons -->
-      <div class="flex items-center space-x-3 z-10">
+      <div class="flex flex-wrap items-center gap-3 z-10">
         <button id="refreshBtn" onclick="fetchMetrics(true)" class="px-4 py-2.5 bg-brand-card hover:bg-brand-cardHover border border-brand-border text-brand-textLight rounded-xl text-sm font-medium transition flex items-center space-x-2 hover:border-brand-primary/50">
           <svg id="refreshIcon" class="w-4 h-4 text-brand-textMuted" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
           </svg>
           <span>Refresh</span>
         </button>
+
+        <a href="/api/v1/audit/export" target="_blank" class="px-4 py-2.5 bg-brand-card hover:bg-brand-cardHover border border-brand-border hover:border-brand-accent/60 text-brand-accent rounded-xl text-sm font-medium transition flex items-center space-x-2">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+          </svg>
+          <span>Export Audit (CSV)</span>
+        </a>
 
         <button id="simBtn" onclick="runBatchSimulation(50)" class="px-5 py-2.5 bg-gradient-to-r from-brand-primary to-brand-accent hover:from-brand-primaryHover hover:to-brand-primary text-white rounded-xl text-sm font-semibold shadow-lg glow-primary transition transform active:scale-95 flex items-center space-x-2">
           <svg id="simSpinner" class="hidden animate-spin w-4 h-4 text-white" fill="none" viewBox="0 0 24 24">
@@ -411,28 +418,43 @@
         </div>
 
         <div class="grid grid-cols-1 md:grid-cols-5 gap-3 mt-4 text-xs">
-          <div class="bg-brand-bg p-3 rounded-lg border border-brand-border">
-            <span class="text-brand-textMuted font-mono block text-[10px] uppercase">AI Recommendation</span>
+          <div class="bg-brand-bg p-3 rounded-lg border border-brand-border" title="Gemini 3.7 Flash Advisory Recommendation (Zero-PII input)">
+            <div class="flex items-center justify-between">
+              <span class="text-brand-textMuted font-mono block text-[10px] uppercase">AI Recommendation</span>
+              <span class="text-[9px] text-brand-accent bg-brand-accent/10 px-1 py-0.5 rounded">Advisory</span>
+            </div>
             <span id="resAiRec" class="font-bold text-white text-xs mt-1 block">--</span>
             <span id="resAiConf" class="text-brand-textMuted text-[11px]">Conf: --</span>
           </div>
-          <div class="bg-brand-bg p-3 rounded-lg border border-brand-border">
-            <span class="text-brand-textMuted font-mono block text-[10px] uppercase">Guardrail Outcome</span>
+          <div class="bg-brand-bg p-3 rounded-lg border border-brand-border" title="Guardrail Engine: Deterministic Final Authority (Consent, ₹500 floor, Unit Economics, Anti-Harassment Cap)">
+            <div class="flex items-center justify-between">
+              <span class="text-brand-textMuted font-mono block text-[10px] uppercase">Guardrail Outcome</span>
+              <span class="text-[9px] text-brand-success bg-brand-success/10 px-1 py-0.5 rounded">Final Authority</span>
+            </div>
             <span id="resGuardrail" class="font-bold text-xs mt-1 block">--</span>
-            <span id="resGuardrailReason" class="text-brand-textMuted text-[11px] truncate block">--</span>
+            <span id="resGuardrailReason" class="text-brand-textMuted text-[11px] truncate block" title="">--</span>
           </div>
-          <div class="bg-brand-bg p-3 rounded-lg border border-brand-border">
-            <span class="text-brand-textMuted font-mono block text-[10px] uppercase">Executed Strategy</span>
+          <div class="bg-brand-bg p-3 rounded-lg border border-brand-border" title="Executed Recovery Strategy dispatched by Decision Engine">
+            <div class="flex items-center justify-between">
+              <span class="text-brand-textMuted font-mono block text-[10px] uppercase">Executed Strategy</span>
+              <span class="text-[9px] text-brand-primary bg-brand-primary/10 px-1 py-0.5 rounded">Action</span>
+            </div>
             <span id="resStrategy" class="font-bold text-brand-accent text-xs mt-1 block">--</span>
             <span id="resAction" class="text-brand-textMuted text-[11px] block">--</span>
           </div>
-          <div class="bg-brand-bg p-3 rounded-lg border border-brand-border">
-            <span class="text-brand-textMuted font-mono block text-[10px] uppercase">Customer Value (Simulated)</span>
+          <div class="bg-brand-bg p-3 rounded-lg border border-brand-border" title="Simulated Customer Value Tier derived from non-PII ID hash & event metadata">
+            <div class="flex items-center justify-between">
+              <span class="text-brand-textMuted font-mono block text-[10px] uppercase">Customer Value</span>
+              <span class="text-[9px] text-teal-400 bg-teal-400/10 px-1 py-0.5 rounded">Simulated</span>
+            </div>
             <span id="resCustomerTier" class="font-bold text-teal-400 text-xs mt-1 block">--</span>
             <span id="resCustomerTenure" class="text-brand-textMuted text-[11px] block">Tenure: --</span>
           </div>
-          <div class="bg-brand-bg p-3 rounded-lg border border-brand-border">
-            <span class="text-brand-textMuted font-mono block text-[10px] uppercase">Net Recovery Value</span>
+          <div class="bg-brand-bg p-3 rounded-lg border border-brand-border" title="Net Recovery Value = Expected Recoverable Amount - Simulated Intervention Cost">
+            <div class="flex items-center justify-between">
+              <span class="text-brand-textMuted font-mono block text-[10px] uppercase">Net Recovery Value</span>
+              <span class="text-[9px] text-brand-success bg-brand-success/10 px-1 py-0.5 rounded">Unit Econ</span>
+            </div>
             <span id="resNetValue" class="font-bold text-brand-success text-xs mt-1 block">--</span>
             <span id="resCostBreakdown" class="text-brand-textMuted text-[11px] block">Cost: ₹0.00</span>
           </div>

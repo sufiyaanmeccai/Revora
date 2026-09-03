@@ -1,30 +1,28 @@
-# Revora — Phase 0 Dependencies
-# Generated: 2026-08-31
+# ⚡ REVORA — Pinned Reproducible Dependencies (Phase 11)
+# Pinned for deterministic judge evaluation & container builds
 
-# ── Web Framework ──────────────────────────────────────────────────────────
-fastapi>=0.110.0
-uvicorn[standard]>=0.28.0
+# ── Web Framework & ASGI Server ───────────────────────────────────────────
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
 
-# ── Data Validation ────────────────────────────────────────────────────────
-pydantic>=2.6.0
-pydantic-settings>=2.2.0
+# ── Data Validation & Configuration ───────────────────────────────────────
+pydantic==2.13.5
+pydantic-settings==2.15.0
+python-dotenv==1.2.3
 
-# ── Razorpay SDK ───────────────────────────────────────────────────────────
-razorpay>=1.4.1
+# ── Razorpay Payment Gateway SDK ──────────────────────────────────────────
+razorpay==2.0.1
 
-# ── Environment / Config ───────────────────────────────────────────────────
-python-dotenv>=1.0.1
+# ── HTTP Client ───────────────────────────────────────────────────────────
+httpx==0.28.1
 
-# ── HTTP Client ────────────────────────────────────────────────────────────
-httpx>=0.27.0
+# ── Asynchronous SQLite & ORM Layer ───────────────────────────────────────
+SQLAlchemy==2.0.52
+aiosqlite==0.22.1
 
-# ── Database ───────────────────────────────────────────────────────────────
-sqlalchemy>=2.0.28
-aiosqlite>=0.20.0
+# ── Google Gemini AI SDK ──────────────────────────────────────────────────
+google-genai==1.0.0
 
-# ── AI Agent / LLM SDK ─────────────────────────────────────────────────────
-google-genai>=1.0.0
-
-# ── Testing ────────────────────────────────────────────────────────────────
-pytest>=8.1.0
-pytest-asyncio>=0.23.5
+# ── Testing Framework & Async Fixtures ────────────────────────────────────
+pytest==9.1.1
+pytest-asyncio==1.4.0

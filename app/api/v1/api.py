@@ -7,7 +7,7 @@ mounted by the main application.
 
 from fastapi import APIRouter
 
-from app.api.v1.endpoints import demo, health, metrics, recovery, simulation, webhooks
+from app.api.v1.endpoints import audit, demo, health, metrics, recovery, simulation, webhooks
 
 api_router = APIRouter()
 
@@ -17,4 +17,5 @@ api_router.include_router(recovery.router)
 api_router.include_router(simulation.router)
 api_router.include_router(metrics.router)
 api_router.include_router(demo.router)
+api_router.include_router(audit.router)
 
