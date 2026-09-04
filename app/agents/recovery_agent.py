@@ -28,6 +28,8 @@ import os
 import re
 from typing import TYPE_CHECKING, Any, Optional
 
+from pydantic import BaseModel, Field
+
 from app.core.config import settings
 from app.models.orm import RecoveryStrategy
 from app.models.schemas import AgentDecision, RecoveryStrategyLiteral
@@ -36,6 +38,37 @@ if TYPE_CHECKING:
     from app.models.orm import PaymentEvent
 
 logger = logging.getLogger(__name__)
+
+
+# --------------------------------------------------------------------------- #
+# Gemini Structured Output Schema DTO (Strictly No Default Values)           #
+# --------------------------------------------------------------------------- #
+
+class _GeminiDecisionSchema(BaseModel):
+    """
+    Gemini API structured-output DTO without default values.
+
+    The official google-genai SDK strictly prohibits the 'default' keyword
+    in OpenAPI response schemas. This DTO enforces that all fields are strictly
+    required to satisfy the Gemini schema validator, before being converted back
+    into the canonical AgentDecision model.
+    """
+
+    recommended_strategy: RecoveryStrategyLiteral = Field(
+        description="The recommended recovery strategy."
+    )
+    confidence_score: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Confidence score from 0.0 to 1.0.",
+    )
+    reasoning: str = Field(
+        description="LLM reasoning chain explaining why this strategy was selected."
+    )
+    requires_consent: bool = Field(
+        description="True if the strategy requires explicit customer consent before execution.",
+    )
+
 
 # Try importing official Google GenAI SDK
 try:
@@ -343,17 +376,29 @@ async def analyze_failure_context(
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
-                    response_schema=AgentDecision,
+                    response_schema=_GeminiDecisionSchema,
                     temperature=0.2,
                 ),
             )
+
+            if getattr(response, "parsed", None) is not None and isinstance(response.parsed, _GeminiDecisionSchema):
+                parsed_dto: _GeminiDecisionSchema = response.parsed
+                decision = AgentDecision(**parsed_dto.model_dump())
+                logger.info(
+                    "Recovery Agent: Gemini decision for %s -> strategy=%s confidence=%.2f",
+                    event.id,
+                    decision.recommended_strategy,
+                    decision.confidence_score,
+                )
+                return decision
 
             if hasattr(response, "text") and response.text:
                 raw_text = response.text.strip()
                 if raw_text.startswith("```"):
                     raw_text = re.sub(r"^```(?:json)?\s*", "", raw_text)
                     raw_text = re.sub(r"\s*```$", "", raw_text)
-                decision = AgentDecision.model_validate_json(raw_text)
+                parsed_dto = _GeminiDecisionSchema.model_validate_json(raw_text)
+                decision = AgentDecision(**parsed_dto.model_dump())
                 logger.info(
                     "Recovery Agent: Gemini decision for %s -> strategy=%s confidence=%.2f",
                     event.id,
@@ -393,17 +438,29 @@ async def analyze_failure_context(
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
-                response_schema=AgentDecision,
+                response_schema=_GeminiDecisionSchema,
                 temperature=0.2,
             ),
         )
+
+        if getattr(response, "parsed", None) is not None and isinstance(response.parsed, _GeminiDecisionSchema):
+            parsed_dto: _GeminiDecisionSchema = response.parsed
+            decision = AgentDecision(**parsed_dto.model_dump())
+            logger.info(
+                "Recovery Agent: Injected client decision for %s -> strategy=%s confidence=%.2f",
+                event.id,
+                decision.recommended_strategy,
+                decision.confidence_score,
+            )
+            return decision
 
         if hasattr(response, "text") and response.text:
             raw_text = response.text.strip()
             if raw_text.startswith("```"):
                 raw_text = re.sub(r"^```(?:json)?\s*", "", raw_text)
                 raw_text = re.sub(r"\s*```$", "", raw_text)
-            decision = AgentDecision.model_validate_json(raw_text)
+            parsed_dto = _GeminiDecisionSchema.model_validate_json(raw_text)
+            decision = AgentDecision(**parsed_dto.model_dump())
             logger.info(
                 "Recovery Agent: Injected client decision for %s -> strategy=%s confidence=%.2f",
                 event.id,
